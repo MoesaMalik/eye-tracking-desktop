@@ -1,45 +1,56 @@
-import { app, BrowserWindow } from "electron";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-createRequire(import.meta.url);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = path.join(__dirname, "..");
-const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
-const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
-const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-let win;
-function createWindow() {
-  win = new BrowserWindow({
-    icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
+import { app as o, BrowserWindow as s, nativeImage as d, Menu as p } from "electron";
+import n from "node:path";
+import { fileURLToPath as m } from "node:url";
+const r = n.dirname(m(import.meta.url));
+process.env.APP_ROOT = n.join(r, "..");
+const i = process.env.VITE_DEV_SERVER_URL, h = n.join(process.env.APP_ROOT, "dist-electron"), c = n.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = i ? n.join(process.env.APP_ROOT, "public") : c;
+let e = null;
+function t() {
+  const a = n.join(
+    process.env.VITE_PUBLIC,
+    process.platform === "win32" ? "icon.ico" : "icon.png"
+  ), l = d.createFromPath(a);
+  e = new s({
+    width: 1200,
+    height: 800,
+    minWidth: 960,
+    minHeight: 600,
+    show: !1,
+    // show when ready for nicer UX
+    title: "Eye Tracking Desktop",
+    // window title
+    icon: l,
+    autoHideMenuBar: !0,
+    // hide menu (Alt shows it). Remove entirely below.
+    backgroundColor: "#0a0a0a",
     webPreferences: {
-      preload: path.join(__dirname, "preload.mjs")
+      preload: n.join(r, "preload.mjs")
+      // If you later enable Node in renderer, review Electron security guidance.
+      // nodeIntegration: false,
+      // contextIsolation: true,
     }
+  }), p.setApplicationMenu(null), i ? e.loadURL(i) : e.loadFile(n.join(c, "index.html")), e.once("ready-to-show", () => {
+    e == null || e.show();
+  }), e.webContents.on("did-finish-load", () => {
+    e == null || e.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
+  }), e.on("closed", () => {
+    e = null;
   });
-  win.webContents.on("did-finish-load", () => {
-    win == null ? void 0 : win.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
-  });
-  if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL);
-  } else {
-    win.loadFile(path.join(RENDERER_DIST, "index.html"));
-  }
 }
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-    win = null;
-  }
+const R = o.requestSingleInstanceLock();
+R ? (o.on("second-instance", () => {
+  e && (e.isMinimized() && e.restore(), e.focus());
+}), o.whenReady().then(() => {
+  o.isPackaged || (process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true"), t(), o.on("activate", () => {
+    s.getAllWindows().length === 0 && t();
+  });
+})) : o.quit();
+o.on("window-all-closed", () => {
+  process.platform !== "darwin" && o.quit();
 });
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
-});
-app.whenReady().then(createWindow);
 export {
-  MAIN_DIST,
-  RENDERER_DIST,
-  VITE_DEV_SERVER_URL
+  h as MAIN_DIST,
+  c as RENDERER_DIST,
+  i as VITE_DEV_SERVER_URL
 };
