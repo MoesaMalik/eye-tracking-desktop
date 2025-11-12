@@ -1,26 +1,47 @@
 // electron/main.ts
-import { app, BrowserWindow, Menu, nativeImage } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeImage,
+  ipcMain,
+  shell,
+} from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-// Keep the plugin-provided envs (these are set by vite-plugin-electron)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.APP_ROOT = path.join(__dirname, "..");
 
-// Use explicit names (same as your current file)
 export const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
-export const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
-export const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
+export const RENDERER_DIST = path.join(process.env.APP_ROOT!, "dist");
 
-// In dev, public assets are under /public; in prod they’re in /dist
+// public assets during dev, or dist assets in prod
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
-  ? path.join(process.env.APP_ROOT, "public")
+  ? path.join(process.env.APP_ROOT!, "public")
   : RENDERER_DIST;
 
 let win: BrowserWindow | null = null;
+let trackerProc: ChildProcessWithoutNullStreams | null = null;
+let lastExitCode: number | null = null;
+
+function resolvePython(): string {
+  // Prefer the local venv on Windows
+  const candidates = [
+    path.join(process.env.APP_ROOT!, ".venv", "Scripts", "python.exe"),
+    "py", // Windows launcher
+    "python",
+    "python3",
+  ];
+  for (const c of candidates) {
+    if (c.includes(path.sep) ? fs.existsSync(c) : true) return c;
+  }
+  return "python";
+}
 
 function createWindow() {
-  // App icon for titlebar/taskbar
   const iconPath = path.join(
     process.env.VITE_PUBLIC!,
     process.platform === "win32" ? "icon.ico" : "icon.png"
@@ -32,53 +53,119 @@ function createWindow() {
     height: 800,
     minWidth: 960,
     minHeight: 600,
-    show: false,                    // show when ready for nicer UX
-    title: "Eye Tracking Desktop",  // window title
+    show: false,
+    title: "Eye Tracking (Demo)",
     icon,
-    autoHideMenuBar: true,          // hide menu (Alt shows it). Remove entirely below.
+    autoHideMenuBar: true,
     backgroundColor: "#0a0a0a",
     webPreferences: {
       preload: path.join(__dirname, "preload.mjs"),
-      // If you later enable Node in renderer, review Electron security guidance.
-      // nodeIntegration: false,
-      // contextIsolation: true,
     },
   });
 
-  // Remove the app menu entirely (so Alt won't bring it back)
+  // remove OS menu entirely
   Menu.setApplicationMenu(null);
 
-  // Dev vs Prod loading
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL);
-    // Optional: open devtools
-    // win.webContents.openDevTools({ mode: "detach" });
   } else {
     win.loadFile(path.join(RENDERER_DIST, "index.html"));
   }
 
-  // Only show when the first paint is ready
-  win.once("ready-to-show", () => {
-    win?.show();
-  });
-
-  // Example of main→renderer message (keep if you use it)
-  win.webContents.on("did-finish-load", () => {
-    win?.webContents.send("main-process-message", new Date().toLocaleString());
-  });
-
-  win.on("closed", () => {
-    win = null;
-  });
+  win.once("ready-to-show", () => win?.show());
+  win.on("closed", () => (win = null));
 }
 
-// Single-instance lock (avoid two app windows on double-click)
+/* -------------------- Tracker IPC -------------------- */
+
+function trackerStatus() {
+  if (trackerProc && !trackerProc.killed) return { status: "running" as const, pid: trackerProc.pid };
+  // if we reached here, not running
+  return { status: "stopped" as const, pid: undefined };
+}
+
+ipcMain.handle("tracking:status", () => {
+  return trackerStatus();
+});
+
+ipcMain.handle(
+  "tracking:start",
+  async (_e, opts: { cam?: number; outDir?: string; script?: string } = {}) => {
+    if (trackerProc && !trackerProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = opts.script
+      ? path.isAbsolute(opts.script)
+        ? opts.script
+        : path.join(process.env.APP_ROOT!, opts.script)
+      : path.join(process.env.APP_ROOT!, "tracker", "main.py");
+
+    const cwd = process.env.APP_ROOT!;
+    const args = [scriptPath];
+
+    try {
+      trackerProc = spawn(python, args, {
+        cwd,
+        env: {
+          ...process.env,
+          // make sure Python prints unbuffered so logs stream live
+          PYTHONUNBUFFERED: "1",
+        },
+      });
+
+      lastExitCode = null;
+
+      trackerProc.stdout.on("data", (buf) => {
+        win?.webContents.send("tracking:stdout", buf.toString());
+      });
+      trackerProc.stderr.on("data", (buf) => {
+        win?.webContents.send("tracking:stderr", buf.toString());
+      });
+      trackerProc.on("close", (code) => {
+        lastExitCode = typeof code === "number" ? code : null;
+        win?.webContents.send("tracking:exit", lastExitCode ?? -1);
+      });
+
+      return { ok: true, message: "started" };
+    } catch (err: any) {
+      trackerProc = null;
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle("tracking:stop", async () => {
+  if (!trackerProc || trackerProc.killed) {
+    return { ok: true, message: "not running" };
+  }
+  try {
+    trackerProc.kill();
+    trackerProc = null;
+    return { ok: true, message: "stopped" };
+  } catch (err: any) {
+    return { ok: false, message: String(err?.message ?? err) };
+  }
+});
+
+ipcMain.handle("tracking:open-output", async () => {
+  const outDir = path.join(process.env.APP_ROOT!, "output");
+  try {
+    await shell.openPath(outDir);
+    return { ok: true, path: outDir };
+  } catch {
+    return { ok: false, path: outDir };
+  }
+});
+
+/* -------------------- App lifecycle -------------------- */
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    // Focus the existing window
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -86,19 +173,17 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    // Suppress dev security warnings in console (dev only)
     if (!app.isPackaged) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
     createWindow();
+  });
 
-    app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    });
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 }
-
-// Quit when all windows closed (except macOS)
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});

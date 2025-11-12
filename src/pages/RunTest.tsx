@@ -1,8 +1,16 @@
+// src/pages/RunTest.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { saveJSON } from "../lib/save";
 import { usePatientStore } from "../store/patientStore";
 import type { Patient, SessionSummary } from "../types";
+import {
+  getTrackerStatus,
+  startTracker,
+  stopTracker,
+  openTrackerOutput,
+  type TrackerStatus,
+} from "../lib/tracker";
 
 type Protocol = { label: string; slides: string[] };
 type ProtocolManifest = Record<string, Protocol>;
@@ -28,21 +36,18 @@ function newSessionId() {
 }
 
 export default function RunTest() {
-  // --- Patients (select raw map to avoid zustand re-render loops) ---
+  // --- Patients ---
   const [params, setParams] = useSearchParams();
   const patientIdParam = params.get("patient") ?? "";
 
   const patientsMap = usePatientStore((s) => s.patients);
   const addSessionSummary = usePatientStore((s) => s.addSessionSummary);
 
-  // Stable array for dropdown
   const patients = useMemo<Patient[]>(
     () => Object.values(patientsMap).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     [patientsMap]
   );
   const patient: Patient | undefined = patientsMap[patientIdParam];
-
-  // picker when URL has no patient
   const [pickerId, setPickerId] = useState<string>("");
 
   // --- Protocols ---
@@ -58,12 +63,31 @@ export default function RunTest() {
   const t0 = useRef<number>(performance.now());
   const [lastEnded, setLastEnded] = useState<SessionExport | null>(null);
 
-  // Load protocols.json once
+  // --- Tracker ---
+  const [trackerStatus, setTrackerStatus] = useState<TrackerStatus>("idle");
+  const [trackerPid, setTrackerPid] = useState<number | undefined>(undefined);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // load protocols
   useEffect(() => {
     fetch("/protocols.json")
       .then((r) => r.json())
       .then((data) => setManifest(data))
-      .catch((e) => console.error("Failed to load protocols.json", e));
+      .catch((e) => {
+        console.error("Failed to load protocols.json", e);
+        setError("Failed to load protocols.json");
+      });
+  }, []);
+
+  // initial tracker status
+  useEffect(() => {
+    getTrackerStatus()
+      .then((s) => {
+        setTrackerStatus(s.status);
+        setTrackerPid(s.pid);
+      })
+      .catch(() => {});
   }, []);
 
   const slides = useMemo(() => manifest[key]?.slides ?? [], [manifest, key]);
@@ -72,7 +96,7 @@ export default function RunTest() {
   const running = !!sessionId && !endedAtIso;
   const ended = !!endedAtIso;
 
-  // keyboard nav
+  // keyboard nav — attach once
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowRight") next();
@@ -80,9 +104,9 @@ export default function RunTest() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
-  // reset on protocol change if not running
+  // reset when protocol changes (if not running)
   useEffect(() => {
     if (running) return;
     setIdx(0);
@@ -90,8 +114,22 @@ export default function RunTest() {
     t0.current = performance.now();
   }, [key, running]);
 
-  function startSession() {
-    if (!patient) return; // enforce patient selection
+  async function startSession() {
+    if (!patient || busy) return;
+    setBusy(true);
+    setError(null);
+
+    const res = await startTracker().catch(() => ({ ok: false, message: "IPC error" }));
+    if (!res.ok) {
+      setError(`Could not start tracker: ${res.message}`);
+      setBusy(false);
+      return;
+    }
+
+    const s = await getTrackerStatus().catch(() => ({ status: "error" as TrackerStatus, pid: undefined }));
+    setTrackerStatus(s.status);
+    setTrackerPid(s.pid);
+
     setLastEnded(null);
     setEndedAtIso(null);
     setSessionId(newSessionId());
@@ -99,17 +137,26 @@ export default function RunTest() {
     t0.current = performance.now();
     setMarks([{ slide: 0, t: 0 }]);
     setIdx(0);
+
+    setBusy(false);
   }
 
-  function endSession() {
-    if (!sessionId || !startedAtIso || ended) return;
+  async function endSession() {
+    if (!sessionId || !startedAtIso || ended || busy) return;
+    setBusy(true);
+
+    const stopRes = await stopTracker().catch(() => ({ ok: false, message: "IPC error" }));
+    if (!stopRes.ok) setError(`Tracker stop: ${stopRes.message}`);
+
+    const s = await getTrackerStatus().catch(() => ({ status: "error" as TrackerStatus, pid: undefined }));
+    setTrackerStatus(s.status);
+    setTrackerPid(s.pid);
 
     const endedIso = new Date().toISOString();
     setEndedAtIso(endedIso);
 
     const label = manifest[key]?.label ?? key;
 
-    // compute per-slide durations from marks
     const durs: number[] = [];
     for (let i = 0; i < marks.length; i++) {
       const tStart = marks[i].t;
@@ -126,12 +173,11 @@ export default function RunTest() {
       totalSlides: slides.length,
       marks: [...marks],
       durations: durs,
-      patientCode: patient?.code, // anonymous only
+      patientCode: patient?.code,
       appBuild: "0.1.0-desktop",
     };
     setLastEnded(exportObj);
 
-    // store a tiny summary for Results page later
     if (patient) {
       const summary: SessionSummary = {
         id: sessionId,
@@ -142,6 +188,8 @@ export default function RunTest() {
       };
       addSessionSummary(summary);
     }
+
+    setBusy(false);
   }
 
   function exportJSON() {
@@ -184,9 +232,31 @@ export default function RunTest() {
     setParams({ patient: pickerId });
   }
 
+  const trackerBadge =
+    trackerStatus === "running"
+      ? "bg-green-100 text-green-800 border-green-300"
+      : trackerStatus === "error"
+      ? "bg-red-100 text-red-800 border-red-300"
+      : trackerStatus === "stopped"
+      ? "bg-amber-100 text-amber-800 border-amber-300"
+      : "bg-gray-100 text-gray-800 border-gray-300";
+
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-xl font-semibold">Run Test</h1>
+      <div className="flex items-center gap-3">
+        <h1 className="text-xl font-semibold">Run Test</h1>
+        <span className={`text-xs px-2 py-0.5 border rounded ${trackerBadge}`}>
+          Tracker: {trackerStatus}
+          {typeof trackerPid === "number" ? ` · pid ${trackerPid}` : ""}
+        </span>
+        {busy && <span className="text-xs text-gray-500">…working</span>}
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded">
+          {error}
+        </div>
+      )}
 
       {/* Patient selector/badge */}
       <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
@@ -197,7 +267,9 @@ export default function RunTest() {
               <b>{patient.code}</b>
               {patient.initials ? <span className="text-gray-500 ml-2">({patient.initials})</span> : null}
             </div>
-            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">Change</Link>
+            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">
+              Change
+            </Link>
           </>
         ) : (
           <>
@@ -221,7 +293,9 @@ export default function RunTest() {
             >
               Use
             </button>
-            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">Create new</Link>
+            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">
+              Create new
+            </Link>
           </>
         )}
       </div>
@@ -233,7 +307,7 @@ export default function RunTest() {
           className="px-3 py-2 border rounded-lg bg-white"
           value={key}
           onChange={(e) => setKey(e.target.value)}
-          disabled={running}
+          disabled={running || busy}
         >
           {Object.entries(manifest).map(([k, v]) => (
             <option key={k} value={k}>
@@ -244,15 +318,19 @@ export default function RunTest() {
 
         {!sessionId ? (
           <button
-            className="ml-3 px-3 py-2 rounded-lg bg-gray-900 text-white"
+            className="ml-3 px-3 py-2 rounded-lg bg-gray-900 text-white disabled:opacity-60"
             onClick={startSession}
-            disabled={!patient || slides.length === 0}
+            disabled={!patient || slides.length === 0 || busy}
             title={!patient ? "Pick a patient first" : ""}
           >
             Start Session
           </button>
         ) : running ? (
-          <button className="ml-3 px-3 py-2 rounded-lg bg-white border" onClick={endSession}>
+          <button
+            className="ml-3 px-3 py-2 rounded-lg bg-white border disabled:opacity-60"
+            onClick={endSession}
+            disabled={busy}
+          >
             End Session
           </button>
         ) : (
@@ -260,12 +338,22 @@ export default function RunTest() {
             <button
               className="ml-3 px-3 py-2 rounded-lg bg-white border"
               onClick={exportJSON}
-              disabled={!lastEnded}
+              disabled={!lastEnded || busy}
             >
               Export JSON
             </button>
-            <button className="ml-2 px-3 py-2 rounded-lg bg-white border" onClick={clearSession}>
+            <button
+              className="ml-2 px-3 py-2 rounded-lg bg-white border"
+              onClick={clearSession}
+              disabled={busy}
+            >
               Clear
+            </button>
+            <button
+              className="ml-2 px-3 py-2 rounded-lg bg-white border"
+              onClick={() => openTrackerOutput()}
+            >
+              Open Output Folder
             </button>
           </>
         )}
@@ -283,7 +371,11 @@ export default function RunTest() {
           ◀ Prev
         </button>
         <span className="text-sm">{slides.length ? `${idx + 1} / ${slides.length}` : "—"}</span>
-        <button className="px-3 py-1 rounded bg-white border" onClick={next} disabled={idx >= slides.length - 1}>
+        <button
+          className="px-3 py-1 rounded bg-white border"
+          onClick={next}
+          disabled={idx >= slides.length - 1}
+        >
           Next ▶
         </button>
       </div>
@@ -309,9 +401,15 @@ export default function RunTest() {
 
       {/* Session info */}
       <div className="p-4 rounded-lg border bg-white space-y-2 text-sm">
-        <div><span className="text-gray-600">Started:</span> <b>{startedAtIso ?? "—"}</b></div>
-        <div><span className="text-gray-600">Ended:</span> <b>{endedAtIso ?? "—"}</b></div>
-        <div><span className="text-gray-600">Recorded slide changes:</span> <b>{marks.length}</b></div>
+        <div>
+          <span className="text-gray-600">Started:</span> <b>{startedAtIso ?? "—"}</b>
+        </div>
+        <div>
+          <span className="text-gray-600">Ended:</span> <b>{endedAtIso ?? "—"}</b>
+        </div>
+        <div>
+          <span className="text-gray-600">Recorded slide changes:</span> <b>{marks.length}</b>
+        </div>
         <div className="text-gray-600">
           Tip: Use ← / → or buttons to change slides. Timing is recorded only while the session is running.
         </div>

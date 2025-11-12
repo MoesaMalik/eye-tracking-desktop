@@ -1,3 +1,4 @@
+// src/App.tsx
 import { NavLink, Outlet } from "react-router-dom";
 
 export default function App() {
@@ -22,6 +23,14 @@ export default function App() {
               }
             >
               Run Test
+            </NavLink>
+            <NavLink
+              to="/recorder"
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`
+              }
+            >
+              Recorder
             </NavLink>
           </nav>
         </div>
