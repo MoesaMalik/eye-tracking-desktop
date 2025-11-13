@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 /// <reference types="vite/client" />
 
 declare global {

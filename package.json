@@ -9,7 +9,9 @@
     "build": "tsc && vite build",           
     "dist": "npm run build && electron-builder", 
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "build": {
     "appId": "com.yourteam.eyetracking",
@@ -49,6 +51,8 @@
     "typescript": "^5.2.2",
     "vite": "^5.1.6",
     "vite-plugin-electron": "^0.28.6",
-    "vite-plugin-electron-renderer": "^0.14.5"
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "vitest": "^1.6.0",
+    "jsdom": "^24.0.0"
   }
 }
