@@ -1,5 +1,5 @@
 // src/pages/RunTest.tsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { saveJSON } from "../lib/save";
 import { usePatientStore } from "../store/patientStore";
@@ -62,12 +62,22 @@ export default function RunTest() {
   const [marks, setMarks] = useState<SlideMark[]>([]);
   const t0 = useRef<number>(performance.now());
   const [lastEnded, setLastEnded] = useState<SessionExport | null>(null);
+  const [slidesReady, setSlidesReady] = useState<boolean>(false);
 
   // --- Tracker ---
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus>("idle");
   const [trackerPid, setTrackerPid] = useState<number | undefined>(undefined);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const slideDelayTimer = useRef<number | null>(null);
+
+  const clearSlideDelay = useCallback(() => {
+    if (slideDelayTimer.current !== null) {
+      window.clearTimeout(slideDelayTimer.current);
+      slideDelayTimer.current = null;
+    }
+  }, []);
 
   // load protocols
   useEffect(() => {
@@ -95,6 +105,27 @@ export default function RunTest() {
 
   const running = !!sessionId && !endedAtIso;
   const ended = !!endedAtIso;
+  const slidesActive = running && trackerStatus === "running";
+  const shouldAutoAdvance = slidesActive && slidesReady;
+
+  const next = useCallback(() => {
+    setIdx((i) => {
+      const ni = Math.min(i + 1, slides.length - 1);
+      if (running && ni !== i) {
+        setMarks((prev) => [...prev, { slide: ni, t: performance.now() - t0.current }]);
+      }
+      return ni;
+    });
+  }, [running, slides.length]);
+  const prev = useCallback(() => {
+    setIdx((i) => {
+      const ni = Math.max(i - 1, 0);
+      if (running && ni !== i) {
+        setMarks((prev) => [...prev, { slide: ni, t: performance.now() - t0.current }]);
+      }
+      return ni;
+    });
+  }, [running]);
 
   // keyboard nav — attach once
   useEffect(() => {
@@ -104,7 +135,7 @@ export default function RunTest() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [next, prev]);
 
   // reset when protocol changes (if not running)
   useEffect(() => {
@@ -114,21 +145,106 @@ export default function RunTest() {
     t0.current = performance.now();
   }, [key, running]);
 
+  const enterFullscreen = useCallback(async () => {
+    const el = stageRef.current;
+    if (!el) return;
+    const anyEl = el as any;
+    const req =
+      anyEl.requestFullscreen ||
+      anyEl.webkitRequestFullscreen ||
+      anyEl.mozRequestFullScreen ||
+      anyEl.msRequestFullscreen;
+    if (req) {
+      try {
+        await req.call(anyEl);
+      } catch {
+        // ignore errors entering fullscreen
+      }
+    }
+  }, []);
+
+  const exitFullscreen = useCallback(async () => {
+    const doc: any = document;
+    if (
+      doc.fullscreenElement ||
+      doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.msFullscreenElement
+    ) {
+      const exit =
+        doc.exitFullscreen ||
+        doc.webkitExitFullscreen ||
+        doc.mozCancelFullScreen ||
+        doc.msExitFullscreen;
+      if (exit) {
+        try {
+          await exit.call(doc);
+        } catch {
+          // ignore errors exiting fullscreen
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!running) {
+      exitFullscreen();
+      clearSlideDelay();
+      setSlidesReady(false);
+    }
+  }, [running, exitFullscreen, clearSlideDelay]);
+
+  useEffect(() => {
+    return () => {
+      exitFullscreen();
+      clearSlideDelay();
+    };
+  }, [exitFullscreen, clearSlideDelay]);
+
+  useEffect(() => {
+    if (!shouldAutoAdvance || slides.length === 0) return;
+    const timer = window.setInterval(() => {
+      next();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [shouldAutoAdvance, slides.length, next]);
+
   async function startSession() {
     if (!patient || busy) return;
     setBusy(true);
     setError(null);
+    clearSlideDelay();
+    setSlidesReady(false);
 
-    const res = await startTracker().catch(() => ({ ok: false, message: "IPC error" }));
+    const res = await startTracker({ preview: false }).catch(() => ({ ok: false, message: "IPC error" }));
     if (!res.ok) {
       setError(`Could not start tracker: ${res.message}`);
       setBusy(false);
       return;
     }
 
-    const s = await getTrackerStatus().catch(() => ({ status: "error" as TrackerStatus, pid: undefined }));
-    setTrackerStatus(s.status);
-    setTrackerPid(s.pid);
+    const readStatus = async () =>
+      getTrackerStatus().catch(() => ({ status: "error" as TrackerStatus, pid: undefined }));
+
+    let trackerInfo = await readStatus();
+    if (trackerInfo.status !== "running") {
+      const timeoutMs = 5000;
+      const intervalMs = 200;
+      const start = performance.now();
+      while (performance.now() - start < timeoutMs && trackerInfo.status !== "running") {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        trackerInfo = await readStatus();
+        if (trackerInfo.status === "running") break;
+      }
+    }
+
+    setTrackerStatus(trackerInfo.status);
+    setTrackerPid(trackerInfo.pid);
+    if (trackerInfo.status !== "running") {
+      setError("Tracker failed to start (camera not ready).");
+      setBusy(false);
+      return;
+    }
 
     setLastEnded(null);
     setEndedAtIso(null);
@@ -137,6 +253,10 @@ export default function RunTest() {
     t0.current = performance.now();
     setMarks([{ slide: 0, t: 0 }]);
     setIdx(0);
+    void enterFullscreen();
+    slideDelayTimer.current = window.setTimeout(() => {
+      setSlidesReady(true);
+    }, 10000);
 
     setBusy(false);
   }
@@ -144,6 +264,8 @@ export default function RunTest() {
   async function endSession() {
     if (!sessionId || !startedAtIso || ended || busy) return;
     setBusy(true);
+    clearSlideDelay();
+    setSlidesReady(false);
 
     const stopRes = await stopTracker().catch(() => ({ ok: false, message: "IPC error" }));
     if (!stopRes.ok) setError(`Tracker stop: ${stopRes.message}`);
@@ -206,25 +328,8 @@ export default function RunTest() {
     setMarks([]);
     setIdx(0);
     setLastEnded(null);
-  }
-
-  function next() {
-    setIdx((i) => {
-      const ni = Math.min(i + 1, slides.length - 1);
-      if (running && ni !== i) {
-        setMarks((prev) => [...prev, { slide: ni, t: performance.now() - t0.current }]);
-      }
-      return ni;
-    });
-  }
-  function prev() {
-    setIdx((i) => {
-      const ni = Math.max(i - 1, 0);
-      if (running && ni !== i) {
-        setMarks((prev) => [...prev, { slide: ni, t: performance.now() - t0.current }]);
-      }
-      return ni;
-    });
+    clearSlideDelay();
+    setSlidesReady(false);
   }
 
   function attachPickedPatient() {
@@ -385,7 +490,7 @@ export default function RunTest() {
         <div className="px-3 py-2 border-b text-sm text-gray-600">
           {manifest[key]?.label ?? "—"} — slide {slides.length ? idx + 1 : "—"}
         </div>
-        <div className="w-full h-[480px] bg-black flex items-center justify-center">
+        <div ref={stageRef} className="w-full h-[480px] bg-black flex items-center justify-center">
           {current ? (
             <img
               src={current}

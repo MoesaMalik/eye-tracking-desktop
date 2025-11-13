@@ -1,8 +1,15 @@
 // src/lib/tracker.ts
 export type TrackerStatus = "idle" | "running" | "stopped" | "error";
 
+export type TrackerStartOptions = {
+  cam?: number;
+  outDir?: string;
+  script?: string;
+  preview?: boolean;
+};
+
 export async function startTracker(
-  opts: { cam?: number; outDir?: string; script?: string } = {}
+  opts: TrackerStartOptions = {}
 ): Promise<{ ok: boolean; message: string }> {
   if (window.tracker?.start) return window.tracker.start(opts);
   if (window.nativeApi?.invoke) return window.nativeApi.invoke("tracking:start", opts);

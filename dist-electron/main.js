@@ -1,56 +1,170 @@
-import { app as o, BrowserWindow as s, nativeImage as d, Menu as p } from "electron";
-import n from "node:path";
-import { fileURLToPath as m } from "node:url";
-const r = n.dirname(m(import.meta.url));
-process.env.APP_ROOT = n.join(r, "..");
-const i = process.env.VITE_DEV_SERVER_URL, h = n.join(process.env.APP_ROOT, "dist-electron"), c = n.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = i ? n.join(process.env.APP_ROOT, "public") : c;
-let e = null;
-function t() {
-  const a = n.join(
+import { ipcMain, shell, app, BrowserWindow, nativeImage, Menu } from "electron";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+process.env.APP_ROOT = path.join(__dirname, "..");
+const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
+const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
+let win = null;
+let trackerProc = null;
+let lastExitCode = null;
+function commandExists(cmd) {
+  try {
+    const checker = process.platform === "win32" ? "where" : "which";
+    const res = spawnSync(checker, [cmd], { stdio: "ignore" });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+function resolvePython() {
+  const root = process.env.APP_ROOT;
+  const winCandidates = [
+    path.join(root, ".venv", "Scripts", "python.exe"),
+    "py",
+    "python",
+    "python3"
+  ];
+  const posixCandidates = [
+    path.join(root, ".venv", "bin", "python"),
+    path.join(root, ".venv", "bin", "python3"),
+    "python3",
+    "python"
+  ];
+  const candidates = process.platform === "win32" ? winCandidates : posixCandidates;
+  for (const candidate of candidates) {
+    if (candidate.includes(path.sep)) {
+      if (fs.existsSync(candidate)) return candidate;
+    } else if (commandExists(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[candidates.length - 1];
+}
+function createWindow() {
+  const iconPath = path.join(
     process.env.VITE_PUBLIC,
     process.platform === "win32" ? "icon.ico" : "icon.png"
-  ), l = d.createFromPath(a);
-  e = new s({
+  );
+  const icon = nativeImage.createFromPath(iconPath);
+  win = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 960,
     minHeight: 600,
-    show: !1,
-    // show when ready for nicer UX
-    title: "Eye Tracking Desktop",
-    // window title
-    icon: l,
-    autoHideMenuBar: !0,
-    // hide menu (Alt shows it). Remove entirely below.
+    show: false,
+    title: "Eye Tracking (Demo)",
+    icon,
+    autoHideMenuBar: true,
     backgroundColor: "#0a0a0a",
     webPreferences: {
-      preload: n.join(r, "preload.mjs")
-      // If you later enable Node in renderer, review Electron security guidance.
-      // nodeIntegration: false,
-      // contextIsolation: true,
+      preload: path.join(__dirname, "preload.mjs")
     }
-  }), p.setApplicationMenu(null), i ? e.loadURL(i) : e.loadFile(n.join(c, "index.html")), e.once("ready-to-show", () => {
-    e == null || e.show();
-  }), e.webContents.on("did-finish-load", () => {
-    e == null || e.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
-  }), e.on("closed", () => {
-    e = null;
+  });
+  Menu.setApplicationMenu(null);
+  if (VITE_DEV_SERVER_URL) {
+    win.loadURL(VITE_DEV_SERVER_URL);
+  } else {
+    win.loadFile(path.join(RENDERER_DIST, "index.html"));
+  }
+  win.once("ready-to-show", () => win == null ? void 0 : win.show());
+  win.on("closed", () => win = null);
+}
+function trackerStatus() {
+  if (trackerProc && !trackerProc.killed) return { status: "running", pid: trackerProc.pid };
+  return { status: "stopped", pid: void 0 };
+}
+ipcMain.handle("tracking:status", () => {
+  return trackerStatus();
+});
+ipcMain.handle(
+  "tracking:start",
+  async (_e, opts = {}) => {
+    if (trackerProc && !trackerProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+    const python = resolvePython();
+    const scriptPath = opts.script ? path.isAbsolute(opts.script) ? opts.script : path.join(process.env.APP_ROOT, opts.script) : path.join(process.env.APP_ROOT, "tracker", "main.py");
+    const cwd = process.env.APP_ROOT;
+    const args = [scriptPath];
+    if (opts.preview === false) {
+      args.push("--no-preview");
+    }
+    try {
+      trackerProc = spawn(python, args, {
+        cwd,
+        env: {
+          ...process.env,
+          // make sure Python prints unbuffered so logs stream live
+          PYTHONUNBUFFERED: "1"
+        }
+      });
+      lastExitCode = null;
+      trackerProc.stdout.on("data", (buf) => {
+        win == null ? void 0 : win.webContents.send("tracking:stdout", buf.toString());
+      });
+      trackerProc.stderr.on("data", (buf) => {
+        win == null ? void 0 : win.webContents.send("tracking:stderr", buf.toString());
+      });
+      trackerProc.on("close", (code) => {
+        lastExitCode = typeof code === "number" ? code : null;
+        win == null ? void 0 : win.webContents.send("tracking:exit", lastExitCode ?? -1);
+      });
+      return { ok: true, message: "started" };
+    } catch (err) {
+      trackerProc = null;
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle("tracking:stop", async () => {
+  if (!trackerProc || trackerProc.killed) {
+    return { ok: true, message: "not running" };
+  }
+  try {
+    trackerProc.kill();
+    trackerProc = null;
+    return { ok: true, message: "stopped" };
+  } catch (err) {
+    return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+  }
+});
+ipcMain.handle("tracking:open-output", async () => {
+  const outDir = path.join(process.env.APP_ROOT, "output");
+  try {
+    await shell.openPath(outDir);
+    return { ok: true, path: outDir };
+  } catch {
+    return { ok: false, path: outDir };
+  }
+});
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+  app.whenReady().then(() => {
+    if (!app.isPackaged) {
+      process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
+    }
+    createWindow();
+  });
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 }
-const R = o.requestSingleInstanceLock();
-R ? (o.on("second-instance", () => {
-  e && (e.isMinimized() && e.restore(), e.focus());
-}), o.whenReady().then(() => {
-  o.isPackaged || (process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true"), t(), o.on("activate", () => {
-    s.getAllWindows().length === 0 && t();
-  });
-})) : o.quit();
-o.on("window-all-closed", () => {
-  process.platform !== "darwin" && o.quit();
-});
 export {
-  h as MAIN_DIST,
-  c as RENDERER_DIST,
-  i as VITE_DEV_SERVER_URL
+  RENDERER_DIST,
+  VITE_DEV_SERVER_URL
 };

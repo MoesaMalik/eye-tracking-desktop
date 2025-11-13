@@ -10,7 +10,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.APP_ROOT = path.join(__dirname, "..");
@@ -27,18 +27,40 @@ let win: BrowserWindow | null = null;
 let trackerProc: ChildProcessWithoutNullStreams | null = null;
 let lastExitCode: number | null = null;
 
+function commandExists(cmd: string) {
+  try {
+    const checker = process.platform === "win32" ? "where" : "which";
+    const res = spawnSync(checker, [cmd], { stdio: "ignore" });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 function resolvePython(): string {
-  // Prefer the local venv on Windows
-  const candidates = [
-    path.join(process.env.APP_ROOT!, ".venv", "Scripts", "python.exe"),
-    "py", // Windows launcher
+  const root = process.env.APP_ROOT!;
+  const winCandidates = [
+    path.join(root, ".venv", "Scripts", "python.exe"),
+    "py",
     "python",
     "python3",
   ];
-  for (const c of candidates) {
-    if (c.includes(path.sep) ? fs.existsSync(c) : true) return c;
+  const posixCandidates = [
+    path.join(root, ".venv", "bin", "python"),
+    path.join(root, ".venv", "bin", "python3"),
+    "python3",
+    "python",
+  ];
+  const candidates = process.platform === "win32" ? winCandidates : posixCandidates;
+
+  for (const candidate of candidates) {
+    if (candidate.includes(path.sep)) {
+      if (fs.existsSync(candidate)) return candidate;
+    } else if (commandExists(candidate)) {
+      return candidate;
+    }
   }
-  return "python";
+  return candidates[candidates.length - 1];
 }
 
 function createWindow() {
@@ -90,7 +112,7 @@ ipcMain.handle("tracking:status", () => {
 
 ipcMain.handle(
   "tracking:start",
-  async (_e, opts: { cam?: number; outDir?: string; script?: string } = {}) => {
+  async (_e, opts: { cam?: number; outDir?: string; script?: string; preview?: boolean } = {}) => {
     if (trackerProc && !trackerProc.killed) {
       return { ok: true, message: "already running" };
     }
@@ -104,6 +126,9 @@ ipcMain.handle(
 
     const cwd = process.env.APP_ROOT!;
     const args = [scriptPath];
+    if (opts.preview === false) {
+      args.push("--no-preview");
+    }
 
     try {
       trackerProc = spawn(python, args, {

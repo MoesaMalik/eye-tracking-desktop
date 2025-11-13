@@ -3,6 +3,7 @@ dist/
 dist-electron/
 out/
 .vite/
+.venv/
 *.log
 npm-debug.log*
 pnpm-debug.log*

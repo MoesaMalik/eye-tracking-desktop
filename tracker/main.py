@@ -1,5 +1,7 @@
 # tracker/main.py
 import os
+import argparse
+import signal
 # Prefer DirectShow over MSMF on Windows; MSMF often fails by index
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 
@@ -13,6 +15,14 @@ import json
 from datetime import datetime
 import shutil
 import sys
+
+stop_requested = False
+
+
+def _handle_stop(signum, _frame):
+    global stop_requested
+    stop_requested = True
+    print(f"\n[INFO] Received signal {signum}; stopping recording…")
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -81,7 +91,7 @@ def _find_sample_video():
             return str(p)
     return None
 
-def record_video(output_dir="recordings"):
+def record_video(output_dir="recordings", show_preview=True):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -104,35 +114,44 @@ def record_video(output_dir="recordings"):
         fps = 30.0
     print(f"Resolution: {width}x{height}")
     print(f"FPS: {fps}")
-    print(f"\nPress 'Q' to stop recording")
-    print(f"{'=' * 70}\n")
+    if show_preview:
+        print(f"\nPress 'Q' to stop recording")
+        print(f"{'=' * 70}\n")
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(str(video_filename), fourcc, fps, (width, height))
 
     frame_count = 0
+    global stop_requested
+    stop_requested = False
+
     while True:
         ok, frame = cap.read()
         if not ok:
             continue
         out.write(frame)
 
-        display = frame.copy()
-        cv2.circle(display, (20, 20), 8, (0, 0, 255), -1)
-        cv2.putText(display, "REC", (35, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(display, f"Time: {frame_count / fps:.1f}s", (20, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(display, "Press 'Q' to quit", (20, height - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        cv2.imshow("Recording - Press Q to Stop", display)
+        if show_preview:
+            display = frame.copy()
+            cv2.circle(display, (20, 20), 8, (0, 0, 255), -1)
+            cv2.putText(display, "REC", (35, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(display, f"Time: {frame_count / fps:.1f}s", (20, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(display, "Press 'Q' to quit", (20, height - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.imshow("Recording - Press Q to Stop", display)
 
         frame_count += 1
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if show_preview and cv2.waitKey(1) & 0xFF == ord('q'):
+            stop_requested = True
+
+        if stop_requested:
             break
 
     cap.release()
     out.release()
-    cv2.destroyAllWindows()
+    if show_preview:
+        cv2.destroyAllWindows()
 
     print(f"\n[OK] Recording complete ({frame_count} frames)\n")
     return str(video_filename), fps
@@ -429,13 +448,24 @@ class EyeTracker:
             print(f"Right edge-based mids: {right_edge}/{len(valid_df)} ({right_edge / len(df) * 100:.1f}%)")
             print(f"{'=' * 70}\n")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Eye tracking recorder/analyzer")
+    parser.add_argument("--no-preview", action="store_true", help="Disable the OpenCV preview window")
+    return parser.parse_args()
+
+
 def main():
+    signal.signal(signal.SIGINT, _handle_stop)
+    signal.signal(signal.SIGTERM, _handle_stop)
+    args = parse_args()
+    show_preview = not args.no_preview
+
     print("\n" + "=" * 70)
     print("EYE TRACKING - RECORD & ANALYZE (Iris Edges Midpoint)")
     print("=" * 70)
 
     try:
-        video_path, fps = record_video()
+        video_path, fps = record_video(show_preview=show_preview)
         use_video = video_path
     except Exception as e:
         print(f"\n[WARN] {e}")
