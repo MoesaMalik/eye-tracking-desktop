@@ -323,6 +323,12 @@ class EyeTracker:
                 r_center_roi = (rcx - rx0, rcy - ry0)
                 right_edges = find_iris_edges(right_roi, r_center_roi, rr)
 
+                # Store raw MediaPipe results for comparison
+                frame_data['mp_left_cx'] = float(lcx)
+                frame_data['mp_left_cy'] = float(lcy)
+                frame_data['mp_right_cx'] = float(rcx)
+                frame_data['mp_right_cy'] = float(rcy)
+
                 if left_edges:
                     (llx, lly), (lrx, lry), lconf = left_edges
                     llx_abs, lly_abs = float(llx + lx0), float(lly + ly0)
@@ -337,6 +343,10 @@ class EyeTracker:
                     frame_data['left_center_y'] = lcy_mid
                     frame_data['left_confidence'] = float(lconf)
                     frame_data['left_method'] = 'edge_band'
+                    
+                    # Explicitly store edge result for comparison
+                    frame_data['edge_left_cx'] = lcx_mid
+                    frame_data['edge_left_cy'] = lcy_mid
 
                     cv2.circle(frame, (int(round(llx_abs)), int(round(lly_abs))), 4, (0, 255, 0), -1)
                     cv2.circle(frame, (int(round(lrx_abs)), int(round(lry_abs))), 4, (0, 255, 0), -1)
@@ -346,6 +356,11 @@ class EyeTracker:
                     frame_data['left_center_y'] = float(lcy)
                     frame_data['left_confidence'] = 0.0
                     frame_data['left_method'] = 'iris_landmark_center'
+                    
+                    # Explicitly store that edge detection failed
+                    frame_data['edge_left_cx'] = None
+                    frame_data['edge_left_cy'] = None
+                    
                     cv2.circle(frame, (int(round(lcx)), int(round(lcy))), 5, VIS_COLORS['mid'], -1)
 
                 if right_edges:
@@ -362,6 +377,10 @@ class EyeTracker:
                     frame_data['right_center_y'] = rcy_mid
                     frame_data['right_confidence'] = float(rconf)
                     frame_data['right_method'] = 'edge_band'
+                    
+                    # Explicitly store edge result for comparison
+                    frame_data['edge_right_cx'] = rcx_mid
+                    frame_data['edge_right_cy'] = rcy_mid
 
                     cv2.circle(frame, (int(round(rlx_abs)), int(round(rly_abs))), 4, (0, 255, 0), -1)
                     cv2.circle(frame, (int(round(rrx_abs)), int(round(rry_abs))), 4, (0, 255, 0), -1)
@@ -371,6 +390,11 @@ class EyeTracker:
                     frame_data['right_center_y'] = float(rcy)
                     frame_data['right_confidence'] = 0.0
                     frame_data['right_method'] = 'iris_landmark_center'
+                    
+                    # Explicitly store that edge detection failed
+                    frame_data['edge_right_cx'] = None
+                    frame_data['edge_right_cy'] = None
+                    
                     cv2.circle(frame, (int(round(rcx)), int(round(rcy))), 5, VIS_COLORS['mid'], -1)
 
                 if 'left_center_x' in frame_data and 'right_center_x' in frame_data:
