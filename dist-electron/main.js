@@ -1,4 +1,4 @@
-import { ipcMain, shell, app, BrowserWindow, nativeImage, Menu } from "electron";
+import { ipcMain, shell, app, protocol, BrowserWindow, nativeImage, Menu } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -141,6 +141,25 @@ ipcMain.handle("tracking:open-output", async () => {
     return { ok: false, path: outDir };
   }
 });
+ipcMain.handle("annotation:list-videos", async () => {
+  const recDir = path.join(process.env.APP_ROOT, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  const files = fs.readdirSync(recDir).filter((f) => f.endsWith(".mp4"));
+  return files.map((f) => ({
+    name: f,
+    path: path.join(recDir, f),
+    createdAt: fs.statSync(path.join(recDir, f)).birthtime
+  })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+});
+ipcMain.handle("annotation:save", async (_e, { videoPath, data }) => {
+  const jsonPath = videoPath.replace(".mp4", "_annotation.json");
+  try {
+    fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -155,6 +174,15 @@ if (!gotLock) {
     if (!app.isPackaged) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
+    protocol.registerFileProtocol("media", (request, callback) => {
+      const url = request.url.replace("media://", "");
+      try {
+        return callback(decodeURIComponent(url));
+      } catch (error) {
+        console.error(error);
+        return callback(404);
+      }
+    });
     createWindow();
   });
   app.on("window-all-closed", () => {

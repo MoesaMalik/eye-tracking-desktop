@@ -25,6 +25,7 @@ export default function Layout() {
           <nav className="flex gap-2">
             <Tab to="/" label="Patients" />
             <Tab to="/run" label="Run Test" />
+            <Tab to="/annotation" label="Annotation" />
             <Tab to="/results" label="Results" />
           </nav>
         </div>

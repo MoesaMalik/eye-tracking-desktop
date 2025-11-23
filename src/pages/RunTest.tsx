@@ -97,7 +97,7 @@ export default function RunTest() {
         setTrackerStatus(s.status);
         setTrackerPid(s.pid);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const slides = useMemo(() => manifest[key]?.slides ?? [], [manifest, key]);
@@ -231,7 +231,7 @@ export default function RunTest() {
       const timeoutMs = 5000;
       const intervalMs = 200;
       const start = performance.now();
-      while (performance.now() - start < timeoutMs && trackerInfo.status !== "running") {
+      while (performance.now() - start < timeoutMs) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
         trackerInfo = await readStatus();
         if (trackerInfo.status === "running") break;
@@ -341,10 +341,10 @@ export default function RunTest() {
     trackerStatus === "running"
       ? "bg-green-100 text-green-800 border-green-300"
       : trackerStatus === "error"
-      ? "bg-red-100 text-red-800 border-red-300"
-      : trackerStatus === "stopped"
-      ? "bg-amber-100 text-amber-800 border-amber-300"
-      : "bg-gray-100 text-gray-800 border-gray-300";
+        ? "bg-red-100 text-red-800 border-red-300"
+        : trackerStatus === "stopped"
+          ? "bg-amber-100 text-amber-800 border-amber-300"
+          : "bg-gray-100 text-gray-800 border-gray-300";
 
   return (
     <div className="p-6 space-y-4">
@@ -524,7 +524,7 @@ export default function RunTest() {
       <div className="p-4 rounded-lg border bg-white">
         <div className="text-sm text-gray-600 mb-2">Slide marks (ms since start):</div>
         <pre className="text-xs max-h-48 overflow-auto">
-{JSON.stringify(marks, null, 2)}
+          {JSON.stringify(marks, null, 2)}
         </pre>
       </div>
     </div>

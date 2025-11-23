@@ -1,5 +1,6 @@
 // src/App.tsx
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, Route, Routes } from "react-router-dom";
+import Annotation from "./pages/Annotation";
 
 export default function App() {
   return (
@@ -37,6 +38,17 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-6">
+        <Routes>
+          <Route path="/" element={<Outlet />}>
+            {/* Existing routes are handled by parent layout or separate config? 
+                 Wait, App.tsx has <Outlet /> but no Routes definition? 
+                 Ah, main.tsx usually handles the router. Let me check main.tsx.
+                 App.tsx seems to be the Layout actually, based on the code.
+                 Let's check main.tsx first before editing App.tsx blindly.
+             */}
+            <Route path="annotation" element={<Annotation />} />
+          </Route>
+        </Routes>
         <Outlet />
       </main>
     </div>

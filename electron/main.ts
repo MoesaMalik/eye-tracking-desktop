@@ -6,6 +6,7 @@ import {
   nativeImage,
   ipcMain,
   shell,
+  protocol,
 } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,6 +185,32 @@ ipcMain.handle("tracking:open-output", async () => {
   }
 });
 
+
+/* -------------------- Annotation IPC -------------------- */
+
+ipcMain.handle("annotation:list-videos", async () => {
+  const recDir = path.join(process.env.APP_ROOT!, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  
+  const files = fs.readdirSync(recDir).filter(f => f.endsWith(".mp4"));
+  // Return full paths so the frontend can use them with media:// protocol
+  return files.map(f => ({
+    name: f,
+    path: path.join(recDir, f),
+    createdAt: fs.statSync(path.join(recDir, f)).birthtime
+  })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+});
+
+ipcMain.handle("annotation:save", async (_e, { videoPath, data }) => {
+  const jsonPath = videoPath.replace(".mp4", "_annotation.json");
+  try {
+    fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2));
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+});
+
 /* -------------------- App lifecycle -------------------- */
 
 const gotLock = app.requestSingleInstanceLock();
@@ -201,6 +228,18 @@ if (!gotLock) {
     if (!app.isPackaged) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
+    
+    protocol.registerFileProtocol("media", (request, callback) => {
+      const url = request.url.replace("media://", "");
+      try {
+        return callback(decodeURIComponent(url));
+      } catch (error) {
+        console.error(error);
+        // @ts-ignore
+        return callback(404);
+      }
+    });
+
     createWindow();
   });
 
