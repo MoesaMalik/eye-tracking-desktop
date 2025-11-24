@@ -1,8 +1,19 @@
-import { ipcMain, shell, app, protocol, BrowserWindow, nativeImage, Menu } from "electron";
+import { protocol, ipcMain, shell, app, BrowserWindow, nativeImage, Menu } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "media",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
+  }
+]);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.APP_ROOT = path.join(__dirname, "..");
 const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
@@ -214,11 +225,21 @@ if (!gotLock) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
     protocol.registerFileProtocol("media", (request, callback) => {
-      const url = request.url.replace("media://", "");
       try {
-        return callback(decodeURIComponent(url));
+        const u = new URL(request.url);
+        let filePath = decodeURIComponent(u.pathname);
+        if (u.hostname && u.hostname !== "localhost") {
+          filePath = `/${u.hostname}${filePath}`;
+        }
+        if (process.platform === "win32") {
+          filePath = filePath.replace(/^\/([A-Za-z]:)/, "$1");
+        }
+        filePath = path.normalize(filePath);
+        const exists = fs.existsSync(filePath);
+        console.log("[media] load", filePath, "exists:", exists);
+        return callback({ path: filePath });
       } catch (error) {
-        console.error(error);
+        console.error("[media] failed to resolve", error);
         return callback(404);
       }
     });

@@ -13,6 +13,18 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "media",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
+]);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.APP_ROOT = path.join(__dirname, "..");
 
@@ -278,15 +290,26 @@ if (!gotLock) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
 
-    protocol.registerFileProtocol("media", (request, callback) => {
-      const url = request.url.replace("media://", "");
-      try {
-        return callback(decodeURIComponent(url));
-      } catch (error) {
-        console.error(error);
-        // @ts-ignore
-        return callback(404);
+  protocol.registerFileProtocol("media", (request, callback) => {
+    try {
+      const u = new URL(request.url);
+      // If hostname is present (e.g., media://users/...), stitch it back into the path
+      let filePath = decodeURIComponent(u.pathname);
+      if (u.hostname && u.hostname !== "localhost") {
+        filePath = `/${u.hostname}${filePath}`;
       }
+      if (process.platform === "win32") {
+        filePath = filePath.replace(/^\/([A-Za-z]:)/, "$1");
+      }
+      filePath = path.normalize(filePath);
+      const exists = fs.existsSync(filePath);
+      console.log("[media] load", filePath, "exists:", exists);
+      return callback({ path: filePath });
+    } catch (error) {
+      console.error("[media] failed to resolve", error);
+      // @ts-ignore
+      return callback(404);
+    }
     });
 
     createWindow();

@@ -25,7 +25,7 @@ def _handle_stop(signum, _frame):
     print(f"\n[INFO] Received signal {signum}; stopping recording…")
 
 # --------- Configuration ----------
-CAM_INDEX = 0
+CAM_INDEX = 1
 
 # Processing params
 CLAHE_CLIP_LIMIT = 3.0
@@ -149,8 +149,17 @@ def record_video(output_dir="recordings", show_preview=True):
         print(f"\nPress 'Q' to stop recording")
         print(f"{'=' * 70}\n")
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(video_filename), fourcc, fps, (width, height))
+    def _make_writer(path, fps_val, size):
+        for codec in ['avc1', 'H264', 'mp4v']:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            writer = cv2.VideoWriter(str(path), fourcc, fps_val, size)
+            if writer.isOpened():
+                print(f"[INFO] Using codec {codec} for {path}")
+                return writer
+            writer.release()
+        raise RuntimeError("Could not create VideoWriter with avc1/H264/mp4v")
+
+    out = _make_writer(video_filename, fps, (width, height))
 
     frame_count = 0
     global stop_requested
@@ -458,8 +467,18 @@ class EyeTracker:
         )
 
         output_video_path = self.output_dir / f"{self.video_path.stem}_tracked.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(str(output_video_path), fourcc, self.fps, (self.width, self.height))
+
+        def _make_writer(path, fps_val, size):
+            for codec in ['avc1', 'H264', 'mp4v']:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                writer = cv2.VideoWriter(str(path), fourcc, fps_val, size)
+                if writer.isOpened():
+                    print(f"[INFO] Using codec {codec} for {path}")
+                    return writer
+                writer.release()
+            raise RuntimeError("Could not create VideoWriter with avc1/H264/mp4v")
+
+        video_writer = _make_writer(output_video_path, self.fps, (self.width, self.height))
 
         print("Processing...\n")
         use_ellipse_L = 0
