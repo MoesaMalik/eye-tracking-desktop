@@ -93,6 +93,9 @@ ipcMain.handle(
     if (opts.preview === false) {
       args.push("--no-preview");
     }
+    if (opts.outDir) {
+      args.push("--output-dir", opts.outDir);
+    }
     try {
       trackerProc = spawn(python, args, {
         cwd,
@@ -159,6 +162,42 @@ ipcMain.handle("annotation:save", async (_e, { videoPath, data }) => {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+ipcMain.handle("recordings:list-folders", async () => {
+  const recDir = path.join(process.env.APP_ROOT, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  const items = fs.readdirSync(recDir);
+  const folders = items.filter((item) => {
+    const itemPath = path.join(recDir, item);
+    return fs.statSync(itemPath).isDirectory();
+  });
+  return folders.map((name) => ({
+    name,
+    path: path.join(recDir, name),
+    createdAt: fs.statSync(path.join(recDir, name)).birthtime
+  })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+});
+ipcMain.handle("session:load-data", async (_e, folderPath) => {
+  if (!fs.existsSync(folderPath)) return { ok: false, error: "Folder not found" };
+  const files = fs.readdirSync(folderPath);
+  const videoFile = files.find((f) => f.endsWith(".mp4") && !f.includes("_tracked"));
+  const trackingFile = files.find((f) => f.endsWith("_tracking_data.json"));
+  if (!videoFile) return { ok: false, error: "No video file found" };
+  const videoPath = path.join(folderPath, videoFile);
+  const trackingPath = trackingFile ? path.join(folderPath, trackingFile) : null;
+  let trackingData = null;
+  if (trackingPath) {
+    try {
+      trackingData = JSON.parse(fs.readFileSync(trackingPath, "utf-8"));
+    } catch (e) {
+      console.error("Failed to parse tracking data", e);
+    }
+  }
+  return {
+    ok: true,
+    videoPath,
+    trackingData
+  };
 });
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
