@@ -424,7 +424,7 @@ export default function CalibrateCurrent() {
                 {/* Main Canvas Area */}
                 <div className="flex-1 bg-black relative overflow-hidden rounded-lg border border-gray-800 flex flex-col">
                     {/* Zoom Controls Overlay */}
-                    <div className="absolute top-4 right-4 z-10 flex gap-2 bg-black/50 p-2 rounded backdrop-blur-sm">
+                    <div className="absolute top-4 right-4 z-20 flex gap-2 bg-black/50 p-2 rounded backdrop-blur-sm">
                         <button
                             className="px-2 py-1 bg-gray-700 rounded hover:bg-gray-600 disabled:opacity-50"
                             onClick={() => setZoomLevel(Math.max(0.5, zoomLevel - 0.5))}
