@@ -22,8 +22,11 @@ export default function CalibrateCurrent() {
     const [comparison, setComparison] = useState<ComparisonResult[]>([]);
     const [avgError, setAvgError] = useState<{ l: number; r: number } | null>(null);
 
+    const [zoomLevel, setZoomLevel] = useState(1);
+
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const FPS = 30;
 
     // Load folders on mount
@@ -52,6 +55,7 @@ export default function CalibrateCurrent() {
         setComparison([]);
         setAvgError(null);
         setCurrentFrame(0);
+        setZoomLevel(1);
 
         // @ts-ignore
         window.ipcRenderer.invoke("session:load-data", selectedFolder).then((res: any) => {
@@ -64,16 +68,17 @@ export default function CalibrateCurrent() {
             const safePath = encodeURI(absolutePath);
             // Keep the path in the URL pathname (media:///Users/...)
             setVideoSrc(`media://${safePath}`);
-            // Parse tracking data if available
-            // Assuming trackingData is array of objects from JSON
-            if (res.trackingData && Array.isArray(res.trackingData)) {
-                // Map to FrameData
-                // The JSON structure from tracker might differ, assuming it matches or we map it.
-                // If it's the raw output from tracker, it might be a list of dicts.
-                // Let's assume it has frame, timestamp, lx, ly, rx, ry.
-                setTrackingData(res.trackingData);
+
+            // Parse tracking data
+            let data = res.trackingData;
+            // Handle new structure { frames: [...], detector_stats: ... }
+            if (data && !Array.isArray(data) && data.frames && Array.isArray(data.frames)) {
+                data = data.frames;
             }
 
+            if (data && Array.isArray(data)) {
+                setTrackingData(data);
+            }
             // Load existing manual corrections if any
             // We might need to load manual_correction.json separately or backend could send it.
             // The prompt says "Saves corrections to manual_correction.json".
@@ -99,7 +104,7 @@ export default function CalibrateCurrent() {
         if (!vid || !cvs) return false;
         if (!vid.videoWidth || !vid.videoHeight) return false;
 
-        // Set canvas size to match video
+        // Set canvas size to match video resolution (internal size)
         if (vid.videoWidth && (cvs.width !== vid.videoWidth || cvs.height !== vid.videoHeight)) {
             cvs.width = vid.videoWidth;
             cvs.height = vid.videoHeight;
@@ -130,37 +135,58 @@ export default function CalibrateCurrent() {
         ctx.clearRect(0, 0, cvs.width, cvs.height);
 
         const frameIdx = currentFrame;
-
-        // Auto-detected
         const auto = trackingData[frameIdx] as any;
-        const { x: lx, y: ly } = getAutoCoords(auto, "left");
-        const { x: rx, y: ry } = getAutoCoords(auto, "right");
+
         if (auto) {
-            // Left Eye (Red, small)
-            if (lx !== undefined && ly !== undefined) {
-                ctx.beginPath();
-                ctx.arc(lx, ly, 4, 0, 2 * Math.PI);
-                ctx.fillStyle = "red";
-                ctx.fill();
-            }
-            // Right Eye (Green, small)
-            if (rx !== undefined && ry !== undefined) {
-                ctx.beginPath();
-                ctx.arc(rx, ry, 4, 0, 2 * Math.PI);
-                ctx.fillStyle = "green";
-                ctx.fill();
-            }
+            // Helper to draw point
+            const drawPoint = (x: number | undefined, y: number | undefined, color: string, radius: number) => {
+                if (x !== undefined && y !== undefined && !isNaN(x) && !isNaN(y)) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                }
+            };
+
+            // 1. Rough MP Centers (Green)
+            drawPoint(auto.left_mp_x, auto.left_mp_y, "lime", 3);
+            drawPoint(auto.right_mp_x, auto.right_mp_y, "lime", 3);
+
+            // 2. Extrema
+            // Left Eye Extrema
+            drawPoint(auto.left_lr_left_x, auto.left_lr_left_y, "orange", 3);
+            drawPoint(auto.left_lr_right_x, auto.left_lr_right_y, "orange", 3);
+            drawPoint(auto.left_tb_top_x, auto.left_tb_top_y, "magenta", 3);
+            drawPoint(auto.left_tb_bottom_x, auto.left_tb_bottom_y, "magenta", 3);
+
+            // Right Eye Extrema
+            drawPoint(auto.right_lr_left_x, auto.right_lr_left_y, "orange", 3);
+            drawPoint(auto.right_lr_right_x, auto.right_lr_right_y, "orange", 3);
+            drawPoint(auto.right_tb_top_x, auto.right_tb_top_y, "magenta", 3);
+            drawPoint(auto.right_tb_bottom_x, auto.right_tb_bottom_y, "magenta", 3);
+
+            // 3. Final Centers (Yellow) - Use getAutoCoords to handle legacy keys if needed, but prioritize new ones
+            const { x: lx, y: ly } = getAutoCoords(auto, "left");
+            const { x: rx, y: ry } = getAutoCoords(auto, "right");
+
+            drawPoint(lx, ly, "yellow", 5);
+            drawPoint(rx, ry, "yellow", 5);
         }
 
         // User-marked
         const manual = manualMarks[frameIdx];
         if (manual) {
-            // Left Eye (Blue, large)
+            // Common style for manual marks
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "white";
+
+            // Left Eye (Cyan, large)
             if (manual.lx !== undefined && manual.ly !== undefined) {
                 ctx.beginPath();
                 ctx.arc(manual.lx, manual.ly, 8, 0, 2 * Math.PI);
-                ctx.fillStyle = "blue";
+                ctx.fillStyle = "cyan";
                 ctx.fill();
+                ctx.stroke(); // Add stroke for visibility
             }
             // Right Eye (Cyan, large)
             if (manual.rx !== undefined && manual.ry !== undefined) {
@@ -168,6 +194,7 @@ export default function CalibrateCurrent() {
                 ctx.arc(manual.rx, manual.ry, 8, 0, 2 * Math.PI);
                 ctx.fillStyle = "cyan";
                 ctx.fill();
+                ctx.stroke(); // Add stroke for visibility
             }
         }
     };
@@ -239,6 +266,8 @@ export default function CalibrateCurrent() {
         if (!cvs) return;
 
         const rect = cvs.getBoundingClientRect();
+        // The rect size is affected by zoom, but the internal resolution (width/height) is constant (video resolution).
+        // scaleX/Y maps from displayed pixels to internal video pixels.
         const scaleX = cvs.width / rect.width;
         const scaleY = cvs.height / rect.height;
 
@@ -306,15 +335,8 @@ export default function CalibrateCurrent() {
         // The prompt says "Saves corrections to manual_correction.json".
         // `annotation:save` in main.ts does: `videoPath.replace(".mp4", "_annotation.json")`.
         // That's not what we want.
-        // I should probably use `saveJSON` to download it, or add a specific IPC.
-        // Given the constraints and existing tools, `saveJSON` is safest for "saving" (downloading).
-        // BUT, prompt 3 says "Backend IPC Updates ... Update existing session:load-data ... Update tracking:start".
-        // It didn't ask for a "save file" IPC.
-        // However, `annotation:save` exists. I could modify it or add a new one?
+        // I should probably use `saveJSON` to download it, or add a new one?
         // "Saves corrections to manual_correction.json" - usually implies writing to disk on backend if it's an electron app.
-        // I'll use `saveJSON` (download) to be safe and compliant with "don't modify backend unless asked".
-        // Wait, I CAN modify backend. I already did.
-        // But I didn't add a "save manual correction" handler.
         // I'll use `saveJSON` for now. It works.
         saveJSON("manual_correction.json", Object.values(manualMarks));
     };
@@ -342,23 +364,63 @@ export default function CalibrateCurrent() {
 
             <div className="flex-1 flex gap-4 min-h-0">
                 {/* Main Canvas Area */}
-                <div className="flex-1 bg-black relative flex items-center justify-center overflow-hidden rounded-lg border border-gray-800">
-                    {videoSrc ? (
-                        <>
-                            <video
-                                ref={videoRef}
-                                src={videoSrc}
-                                className="absolute inset-0 max-w-full max-h-full w-auto h-auto object-contain m-auto"
-                            />
-                            <canvas
-                                ref={canvasRef}
-                                className="absolute inset-0 max-w-full max-h-full w-auto h-auto cursor-crosshair m-auto"
-                                onClick={handleCanvasClick}
-                            />
-                        </>
-                    ) : (
-                        <div className="absolute text-gray-500">No video loaded</div>
-                    )}
+                <div className="flex-1 bg-black relative overflow-hidden rounded-lg border border-gray-800 flex flex-col">
+                    {/* Zoom Controls Overlay */}
+                    <div className="absolute top-4 right-4 z-10 flex gap-2 bg-black/50 p-2 rounded backdrop-blur-sm">
+                        <button
+                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20"
+                            onClick={() => setZoomLevel(Math.max(0.5, zoomLevel - 0.5))}
+                        >
+                            -
+                        </button>
+                        <span className="text-white px-2 py-1 min-w-[3rem] text-center">
+                            {Math.round(zoomLevel * 100)}%
+                        </span>
+                        <button
+                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20"
+                            onClick={() => setZoomLevel(Math.min(5, zoomLevel + 0.5))}
+                        >
+                            +
+                        </button>
+                        <button
+                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20 ml-2"
+                            onClick={() => setZoomLevel(1)}
+                        >
+                            Reset
+                        </button>
+                    </div>
+
+                    <div
+                        ref={containerRef}
+                        className="flex-1 overflow-auto relative flex items-center justify-center bg-gray-900"
+                    >
+                        {videoSrc ? (
+                            <div
+                                style={{
+                                    width: `${zoomLevel * 100}%`,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    flexShrink: 0 // Prevent shrinking in flex container
+                                }}
+                            >
+                                <div className="relative w-full">
+                                    <video
+                                        ref={videoRef}
+                                        src={videoSrc}
+                                        className="w-full h-auto block"
+                                    />
+                                    <canvas
+                                        ref={canvasRef}
+                                        className="absolute inset-0 w-full h-full cursor-crosshair z-10"
+                                        onClick={handleCanvasClick}
+                                    />
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="text-gray-500">No video loaded</div>
+                        )}
+                    </div>
                 </div>
 
                 {/* Sidebar */}

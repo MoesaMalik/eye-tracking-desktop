@@ -457,6 +457,7 @@ class EyeTracker:
         print(f"{'=' * 70}\n")
 
     def process_video(self):
+        # MediaPipe FaceMesh with iris landmarks
         mp_face_mesh = mp.solutions.face_mesh
         face_mesh = mp_face_mesh.FaceMesh(
             static_image_mode=False,
@@ -505,6 +506,7 @@ class EyeTracker:
                 lms = result.multi_face_landmarks[0].landmark
                 frame_data['face_detected'] = True
 
+                # MediaPipe iris rough center & radius (full-frame)
                 lcx_mp, lcy_mp, lr = iris_center_radius(lms, LEFT_IRIS_IDX, self.width, self.height)
                 rcx_mp, rcy_mp, rr = iris_center_radius(lms, RIGHT_IRIS_IDX, self.width, self.height)
 
@@ -513,30 +515,43 @@ class EyeTracker:
                 frame_data['right_mp_x'] = rcx_mp
                 frame_data['right_mp_y'] = rcy_mp
 
+                # Draw rough MP iris centers (green)
                 cv2.circle(frame, (int(round(lcx_mp)), int(round(lcy_mp))), 3, VIS_COLORS['rough'], 1)
                 cv2.circle(frame, (int(round(rcx_mp)), int(round(rcy_mp))), 3, VIS_COLORS['rough'], 1)
 
+                # Dynamic ROIs around iris (full-frame)
                 lx0, ly0, lx1, ly1 = get_eye_roi_dynamic(self.width, self.height, (lcx_mp, lcy_mp), lr)
                 rx0, ry0, rx1, ry1 = get_eye_roi_dynamic(self.width, self.height, (rcx_mp, rcy_mp), rr)
                 left_roi = frame[ly0:ly1, lx0:lx1]
                 right_roi = frame[ry0:ry1, rx0:rx1]
 
+                # Draw ROI boxes
                 cv2.rectangle(frame, (lx0, ly0), (lx1, ly1), VIS_COLORS['roi_box'], 1)
                 cv2.rectangle(frame, (rx0, ry0), (rx1, ry1), VIS_COLORS['roi_box'], 1)
 
-                # LEFT EYE
+                # ---- LEFT: try ellipse and circle, choose best by confidence ----
                 l_ell = iris_center_ellipse(left_roi, (lcx_mp - lx0, lcy_mp - ly0), lr)
                 l_cir = iris_center_circle(left_roi, (lcx_mp - lx0, lcy_mp - ly0), lr)
 
                 bestL = None
                 if l_ell and l_cir:
-                    conf_ell = l_ell[2] * (0.9 + 0.1 * l_ell[4])
+                    # prefer the model with higher confidence; slight bias to ellipse if very circular too
+                    conf_ell = l_ell[2] * (0.9 + 0.1 * l_ell[4])  # boost if circular
                     conf_cir = l_cir[2]
                     bestL = ('ellipse', l_ell) if conf_ell >= conf_cir else ('circle', l_cir)
                 elif l_ell:
                     bestL = ('ellipse', l_ell)
                 elif l_cir:
                     bestL = ('circle', l_cir)
+
+                # Initialize edge values in frame_data (NaN by default)
+                for key in [
+                    'left_lr_left_x', 'left_lr_left_y',
+                    'left_lr_right_x', 'left_lr_right_y',
+                    'left_tb_top_x', 'left_tb_top_y',
+                    'left_tb_bottom_x', 'left_tb_bottom_y'
+                ]:
+                    frame_data[key] = float('nan')
 
                 if bestL:
                     model_type, res = bestL
@@ -552,6 +567,7 @@ class EyeTracker:
                     lcy_abs = float(cyR + ly0)
 
                     if conf < MIN_CONF and self.last_left_center is not None:
+                        # hold previous stable value
                         lcx_abs, lcy_abs = self.last_left_center
                         method = method_base + "_held(prev)"
                         conf_used = conf
@@ -565,9 +581,44 @@ class EyeTracker:
                     frame_data['left_confidence'] = float(conf_used)
                     frame_data['left_method'] = method
 
+                    # Draw final left iris center (yellow)
                     cv2.circle(frame, (int(round(lcx_abs)), int(round(lcy_abs))),
                                5, VIS_COLORS['mid'], -1)
+
+                    # Draw and store extrema if available
+                    if x_min is not None:
+                        # Left/right extrema
+                        left_x_abs = lx0 + x_min
+                        right_x_abs = lx0 + x_max
+                        # Use iris center y for drawing LR extrema
+                        left_y_abs = lcy_abs
+                        right_y_abs = lcy_abs
+                        cv2.circle(frame, (int(round(left_x_abs)), int(round(left_y_abs))),
+                                   3, VIS_COLORS['extreme_lr'], -1)
+                        cv2.circle(frame, (int(round(right_x_abs)), int(round(right_y_abs))),
+                                   3, VIS_COLORS['extreme_lr'], -1)
+                        frame_data['left_lr_left_x'] = float(left_x_abs)
+                        frame_data['left_lr_left_y'] = float(left_y_abs)
+                        frame_data['left_lr_right_x'] = float(right_x_abs)
+                        frame_data['left_lr_right_y'] = float(right_y_abs)
+
+                    if y_min is not None:
+                        # Top/bottom extrema
+                        top_y_abs = ly0 + y_min
+                        bottom_y_abs = ly0 + y_max
+                        # Use iris center x for drawing TB extrema
+                        top_x_abs = lcx_abs
+                        bottom_x_abs = lcx_abs
+                        cv2.circle(frame, (int(round(top_x_abs)), int(round(top_y_abs))),
+                                   3, VIS_COLORS['extreme_tb'], -1)
+                        cv2.circle(frame, (int(round(bottom_x_abs)), int(round(bottom_y_abs))),
+                                   3, VIS_COLORS['extreme_tb'], -1)
+                        frame_data['left_tb_top_x'] = float(top_x_abs)
+                        frame_data['left_tb_top_y'] = float(top_y_abs)
+                        frame_data['left_tb_bottom_x'] = float(bottom_x_abs)
+                        frame_data['left_tb_bottom_y'] = float(bottom_y_abs)
                 else:
+                    # last resort: MP center (per-frame, still exact frame, no smoothing)
                     frame_data['left_center_x'] = float(lcx_mp)
                     frame_data['left_center_y'] = float(lcy_mp)
                     frame_data['left_confidence'] = 0.2
@@ -575,7 +626,7 @@ class EyeTracker:
                     self.last_left_center = (lcx_mp, lcy_mp)
                     cv2.circle(frame, (int(round(lcx_mp)), int(round(lcy_mp))), 5, VIS_COLORS['mid'], -1)
 
-                # RIGHT EYE
+                # ---- RIGHT: ellipse vs circle ----
                 r_ell = iris_center_ellipse(right_roi, (rcx_mp - rx0, rcy_mp - ry0), rr)
                 r_cir = iris_center_circle(right_roi, (rcx_mp - rx0, rcy_mp - ry0), rr)
 
@@ -588,6 +639,15 @@ class EyeTracker:
                     bestR = ('ellipse', r_ell)
                 elif r_cir:
                     bestR = ('circle', r_cir)
+
+                # Initialize edge values in frame_data (NaN by default)
+                for key in [
+                    'right_lr_left_x', 'right_lr_left_y',
+                    'right_lr_right_x', 'right_lr_right_y',
+                    'right_tb_top_x', 'right_tb_top_y',
+                    'right_tb_bottom_x', 'right_tb_bottom_y'
+                ]:
+                    frame_data[key] = float('nan')
 
                 if bestR:
                     model_type, res = bestR
@@ -616,8 +676,38 @@ class EyeTracker:
                     frame_data['right_confidence'] = float(conf_used)
                     frame_data['right_method'] = method
 
+                    # Draw final right iris center (yellow)
                     cv2.circle(frame, (int(round(rcx_abs)), int(round(rcy_abs))),
                                5, VIS_COLORS['mid'], -1)
+
+                    # Draw and store extrema if available
+                    if x_min is not None:
+                        left_x_abs = rx0 + x_min
+                        right_x_abs = rx0 + x_max
+                        left_y_abs = rcy_abs
+                        right_y_abs = rcy_abs
+                        cv2.circle(frame, (int(round(left_x_abs)), int(round(left_y_abs))),
+                                   3, VIS_COLORS['extreme_lr'], -1)
+                        cv2.circle(frame, (int(round(right_x_abs)), int(round(right_y_abs))),
+                                   3, VIS_COLORS['extreme_lr'], -1)
+                        frame_data['right_lr_left_x'] = float(left_x_abs)
+                        frame_data['right_lr_left_y'] = float(left_y_abs)
+                        frame_data['right_lr_right_x'] = float(right_x_abs)
+                        frame_data['right_lr_right_y'] = float(right_y_abs)
+
+                    if y_min is not None:
+                        top_y_abs = ry0 + y_min
+                        bottom_y_abs = ry0 + y_max
+                        top_x_abs = rcx_abs
+                        bottom_x_abs = rcx_abs
+                        cv2.circle(frame, (int(round(top_x_abs)), int(round(top_y_abs))),
+                                   3, VIS_COLORS['extreme_tb'], -1)
+                        cv2.circle(frame, (int(round(bottom_x_abs)), int(round(bottom_y_abs))),
+                                   3, VIS_COLORS['extreme_tb'], -1)
+                        frame_data['right_tb_top_x'] = float(top_x_abs)
+                        frame_data['right_tb_top_y'] = float(top_y_abs)
+                        frame_data['right_tb_bottom_x'] = float(bottom_x_abs)
+                        frame_data['right_tb_bottom_y'] = float(bottom_y_abs)
                 else:
                     frame_data['right_center_x'] = float(rcx_mp)
                     frame_data['right_center_y'] = float(rcy_mp)
@@ -626,6 +716,7 @@ class EyeTracker:
                     self.last_right_center = (rcx_mp, rcy_mp)
                     cv2.circle(frame, (int(round(rcx_mp)), int(round(rcy_mp))), 5, VIS_COLORS['mid'], -1)
 
+                # Per-frame gaze (no temporal smoothing, just geometric mean)
                 frame_data['gaze_x'] = (frame_data['left_center_x'] + frame_data['right_center_x']) / 2.0
                 frame_data['gaze_y'] = (frame_data['left_center_y'] + frame_data['right_center_y']) / 2.0
 
@@ -653,7 +744,7 @@ class EyeTracker:
 
     def _draw_overlay(self, frame, data):
         overlay = frame.copy()
-        cv2.rectangle(overlay, (5, 5), (650, 140), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (5, 5), (650, 190), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
         y = 25
@@ -666,19 +757,23 @@ class EyeTracker:
 
         if 'left_center_x' in data:
             cv2.putText(frame,
-                        f"L: ({int(data['left_center_x'])},{int(data['left_center_y'])}) "
-                        f"conf {data['left_confidence']:.2f}",
+                        f"L center: ({int(data['left_center_x'])},{int(data['left_center_y'])}) "
+                        f"conf {data['left_confidence']:.2f} [{data['left_method']}]",
                         (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['left_dot'], 1)
         y += 25
         if 'right_center_x' in data:
             cv2.putText(frame,
-                        f"R: ({int(data['right_center_x'])},{int(data['right_center_y'])}) "
-                        f"conf {data['right_confidence']:.2f}",
+                        f"R center: ({int(data['right_center_x'])},{int(data['right_center_y'])}) "
+                        f"conf {data['right_confidence']:.2f} [{data['right_method']}]",
                         (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['right_dot'], 1)
         y += 25
         if 'gaze_x' in data:
             cv2.putText(frame, f"Gaze: ({int(data['gaze_x'])},{int(data['gaze_y'])})",
                         (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['mid'], 1)
+        y += 25
+        # just a hint about colors
+        cv2.putText(frame, "Green=MP center  Yellow=Final center  Orange=LR edges  Magenta=TB edges",
+                    (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, VIS_COLORS['text'], 1)
 
     def _save_tracking_data(self):
         df = pd.DataFrame(self.tracking_data)
@@ -688,17 +783,27 @@ class EyeTracker:
 
         json_path = self.output_dir / f"{self.video_path.stem}_tracking_data.json"
         with open(json_path, 'w') as f:
-            json.dump(self.tracking_data, f, indent=2)
+            payload = {
+                'frames': self.tracking_data,
+                'detector_stats': getattr(self, 'detector_stats', {})
+            }
+
+            json.dump(payload, f, indent=2)
         print(f"✓ JSON: {json_path}")
 
     def _generate_summary(self):
         df = pd.DataFrame(self.tracking_data)
         valid_df = df[df['face_detected'] == True]
         if len(valid_df) > 0:
+            left_ellipse = (valid_df['left_method'].astype(str).str.startswith('ellipse_fit')).sum()
+            right_ellipse = (valid_df['right_method'].astype(str).str.startswith('ellipse_fit')).sum()
+
             print(f"\n{'=' * 70}")
-            print("SUMMARY")
+            print("SUMMARY (Per-frame, no smoothing)")
             print(f"{'=' * 70}")
             print(f"Face Detected: {len(valid_df)}/{len(df)} frames ({len(valid_df) / len(df) * 100:.1f}%)")
+            print(f"Left ellipse-based:  {left_ellipse}/{len(valid_df)} ({left_ellipse / len(valid_df) * 100:.1f}%)")
+            print(f"Right ellipse-based: {right_ellipse}/{len(valid_df)} ({right_ellipse / len(valid_df) * 100:.1f}%)")
             print(f"{'=' * 70}\n")
 
 
