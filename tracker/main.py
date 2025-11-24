@@ -529,6 +529,17 @@ class EyeTracker:
                 cv2.rectangle(frame, (lx0, ly0), (lx1, ly1), VIS_COLORS['roi_box'], 1)
                 cv2.rectangle(frame, (rx0, ry0), (rx1, ry1), VIS_COLORS['roi_box'], 1)
 
+                # Store ROI boxes so calibration UI can use them
+                frame_data['left_roi_x0'] = float(lx0)
+                frame_data['left_roi_y0'] = float(ly0)
+                frame_data['left_roi_x1'] = float(lx1)
+                frame_data['left_roi_y1'] = float(ly1)
+
+                frame_data['right_roi_x0'] = float(rx0)
+                frame_data['right_roi_y0'] = float(ry0)
+                frame_data['right_roi_x1'] = float(rx1)
+                frame_data['right_roi_y1'] = float(ry1)
+
                 # ---- LEFT: try ellipse and circle, choose best by confidence ----
                 l_ell = iris_center_ellipse(left_roi, (lcx_mp - lx0, lcy_mp - ly0), lr)
                 l_cir = iris_center_circle(left_roi, (lcx_mp - lx0, lcy_mp - ly0), lr)
@@ -626,6 +637,31 @@ class EyeTracker:
                     self.last_left_center = (lcx_mp, lcy_mp)
                     cv2.circle(frame, (int(round(lcx_mp)), int(round(lcy_mp))), 5, VIS_COLORS['mid'], -1)
 
+                # Compute left iris diameter (in full-frame pixels)
+                left_diam = float('nan')
+
+                # Prefer horizontal distance between LR extrema if available
+                if (
+                    'left_lr_left_x' in frame_data and 'left_lr_right_x' in frame_data and
+                    not np.isnan(frame_data['left_lr_left_x']) and
+                    not np.isnan(frame_data['left_lr_right_x'])
+                ):
+                    left_diam = frame_data['left_lr_right_x'] - frame_data['left_lr_left_x']
+
+                # Otherwise, try vertical distance between TB extrema
+                if np.isnan(left_diam) and (
+                    'left_tb_top_y' in frame_data and 'left_tb_bottom_y' in frame_data and
+                    not np.isnan(frame_data['left_tb_top_y']) and
+                    not np.isnan(frame_data['left_tb_bottom_y'])
+                ):
+                    left_diam = frame_data['left_tb_bottom_y'] - frame_data['left_tb_top_y']
+
+                # Fallback: use MediaPipe iris radius lr if still NaN
+                if np.isnan(left_diam):
+                    left_diam = 2.0 * lr  # lr is the iris radius from iris_center_radius
+
+                frame_data['left_iris_diameter'] = float(left_diam)
+
                 # ---- RIGHT: ellipse vs circle ----
                 r_ell = iris_center_ellipse(right_roi, (rcx_mp - rx0, rcy_mp - ry0), rr)
                 r_cir = iris_center_circle(right_roi, (rcx_mp - rx0, rcy_mp - ry0), rr)
@@ -715,6 +751,31 @@ class EyeTracker:
                     frame_data['right_method'] = 'iris_landmark_center'
                     self.last_right_center = (rcx_mp, rcy_mp)
                     cv2.circle(frame, (int(round(rcx_mp)), int(round(rcy_mp))), 5, VIS_COLORS['mid'], -1)
+
+                # Compute right iris diameter (in full-frame pixels)
+                right_diam = float('nan')
+
+                # Prefer horizontal distance between LR extrema if available
+                if (
+                    'right_lr_left_x' in frame_data and 'right_lr_right_x' in frame_data and
+                    not np.isnan(frame_data['right_lr_left_x']) and
+                    not np.isnan(frame_data['right_lr_right_x'])
+                ):
+                    right_diam = frame_data['right_lr_right_x'] - frame_data['right_lr_left_x']
+
+                # Otherwise, try vertical distance between TB extrema
+                if np.isnan(right_diam) and (
+                    'right_tb_top_y' in frame_data and 'right_tb_bottom_y' in frame_data and
+                    not np.isnan(frame_data['right_tb_top_y']) and
+                    not np.isnan(frame_data['right_tb_bottom_y'])
+                ):
+                    right_diam = frame_data['right_tb_bottom_y'] - frame_data['right_tb_top_y']
+
+                # Fallback: use MediaPipe iris radius rr if still NaN
+                if np.isnan(right_diam):
+                    right_diam = 2.0 * rr  # rr is the iris radius from iris_center_radius
+
+                frame_data['right_iris_diameter'] = float(right_diam)
 
                 # Per-frame gaze (no temporal smoothing, just geometric mean)
                 frame_data['gaze_x'] = (frame_data['left_center_x'] + frame_data['right_center_x']) / 2.0

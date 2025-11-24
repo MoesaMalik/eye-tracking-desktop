@@ -66,6 +66,7 @@ export default function RunTest() {
   // --- Protocols ---
   const [manifest, setManifest] = useState<ProtocolManifest>({});
   const [key, setKey] = useState<string>("saccades");
+  const [mode, setMode] = useState<'all' | 'single'>('single');
 
   // --- Slides / Session ---
   const [idx, setIdx] = useState<number>(0);
@@ -96,7 +97,12 @@ export default function RunTest() {
   useEffect(() => {
     fetch("/protocols.json")
       .then((r) => r.json())
-      .then((data) => setManifest(data))
+      .then((data) => {
+        setManifest(data);
+        // Default to first protocol if available
+        const keys = Object.keys(data);
+        if (keys.length > 0) setKey(keys[0]);
+      })
       .catch((e) => {
         console.error("Failed to load protocols.json", e);
         setError("Failed to load protocols.json");
@@ -255,30 +261,27 @@ export default function RunTest() {
       // Wait for the duration of the last slide then move to next protocol or stop.
       const duration = PROTOCOL_DURATIONS[key] ?? 400;
       const timer = setTimeout(() => {
-        const keys = Object.keys(manifest);
-        const currentKeyIdx = keys.indexOf(key);
-        if (currentKeyIdx < keys.length - 1) {
-          // Move to next protocol
-          const nextKey = keys[currentKeyIdx + 1];
-          setKey(nextKey);
-          setIdx(0); // Reset index for the new protocol
-          // Reset for next protocol is handled by the `useEffect` on `key` change, 
-          // but that effect returns early if running. So we MUST reset it here.
+        if (mode === 'single') {
+          // Single mode: stop after this protocol
+          endSession();
         } else {
-          // All protocols done
-          endSession().then(() => {
-            // Redirect will happen in endSession or after it?
-            // endSession is async.
-            // We need to redirect after endSession completes.
-            // But endSession updates state.
-            // We can redirect here if we are sure it's done.
-            // Or use a separate effect on `lastEnded`.
-          });
+          // All mode: try to go to next protocol
+          const keys = Object.keys(manifest);
+          const currentKeyIdx = keys.indexOf(key);
+          if (currentKeyIdx < keys.length - 1) {
+            // Move to next protocol
+            const nextKey = keys[currentKeyIdx + 1];
+            setKey(nextKey);
+            setIdx(0); // Reset index for the new protocol
+          } else {
+            // All protocols done
+            endSession();
+          }
         }
       }, duration);
       return () => clearTimeout(timer);
     }
-  }, [idx, slides.length, shouldAutoAdvance, key, manifest]); // Added dependencies
+  }, [idx, slides.length, shouldAutoAdvance, key, manifest, mode]);
 
   // Redirect after session ends
   useEffect(() => {
@@ -302,15 +305,25 @@ export default function RunTest() {
     clearSlideDelay();
     setSlidesReady(false);
 
-    // Pass outDir to startTracker
-    // We need to construct the outDir based on the session ID we are ABOUT to create.
-    // But `startTracker` is called BEFORE `newSessionId` in the original code?
-    // Wait, original code:
-    // 1. startTracker
-    // 2. wait for running
-    // 3. setSessionId(newSessionId())
+    // If mode is ALL, ensure we start from the first protocol
+    if (mode === 'all') {
+      const keys = Object.keys(manifest);
+      if (keys.length > 0 && key !== keys[0]) {
+        setKey(keys[0]);
+        // We need to wait for key to update? 
+        // Actually, setKey is async-ish but we are inside startSession.
+        // The effect [key] resets idx/marks.
+        // But we are about to setSessionId which makes running=true.
+        // If we change key here, the effect `reset when protocol changes` might fire?
+        // "if (running) return" in that effect prevents reset if running.
+        // So we should setKey first, then start?
+        // But we can't await state update.
+        // Ideally we setKey, and let the user click start again? 
+        // Or we assume the user selected "ALL" which sets key to first one immediately.
+        // In the onChange handler we setKey to first one. So key should be correct already.
+      }
+    }
 
-    // To pass outDir, we need the session ID first.
     const sid = newSessionId();
     // const outDir = `recordings/${sid}`; // Unused variable removed
     // Relative to app root, or absolute?
@@ -522,10 +535,21 @@ export default function RunTest() {
         <label className="text-sm text-gray-600">Protocol</label>
         <select
           className="px-3 py-2 border rounded-lg bg-white"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
+          value={mode === 'all' ? 'ALL' : key}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === 'ALL') {
+              setMode('all');
+              const keys = Object.keys(manifest);
+              if (keys.length > 0) setKey(keys[0]);
+            } else {
+              setMode('single');
+              setKey(val);
+            }
+          }}
           disabled={running || busy}
         >
+          <option value="ALL">Run All Tests</option>
           {Object.entries(manifest).map(([k, v]) => (
             <option key={k} value={k}>
               {v.label} ({v.slides.length})

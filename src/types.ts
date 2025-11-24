@@ -42,4 +42,6 @@ export type ComparisonResult = {
   frame: number;
   l_error: number | null;
   r_error: number | null;
+  l_error_pct?: number | null; // left error as % of iris diameter
+  r_error_pct?: number | null; // right error as % of iris diameter
 };

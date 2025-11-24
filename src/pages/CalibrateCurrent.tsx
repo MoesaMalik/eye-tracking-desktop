@@ -3,6 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { saveJSON } from "../lib/save";
 import type { RecordingFolder, FrameData, ManualMark, ComparisonResult } from "../types";
 
+const DEFAULT_FPS = 30;
+
 export default function CalibrateCurrent() {
     const [params] = useSearchParams();
     const initialSessionId = params.get("session");
@@ -22,12 +24,13 @@ export default function CalibrateCurrent() {
     const [comparison, setComparison] = useState<ComparisonResult[]>([]);
     const [avgError, setAvgError] = useState<{ l: number; r: number } | null>(null);
 
-    const [zoomLevel, setZoomLevel] = useState(1);
+    const [zoomLevel, setZoomLevel] = useState(1); // 1 = 100%
+
+    const [videoFPS, setVideoFPS] = useState<number>(DEFAULT_FPS);
 
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const FPS = 30;
 
     // Load folders on mount
     useEffect(() => {
@@ -56,6 +59,7 @@ export default function CalibrateCurrent() {
         setAvgError(null);
         setCurrentFrame(0);
         setZoomLevel(1);
+        setVideoFPS(DEFAULT_FPS);
 
         // @ts-ignore
         window.ipcRenderer.invoke("session:load-data", selectedFolder).then((res: any) => {
@@ -79,12 +83,7 @@ export default function CalibrateCurrent() {
             if (data && Array.isArray(data)) {
                 setTrackingData(data);
             }
-            // Load existing manual corrections if any
-            // We might need to load manual_correction.json separately or backend could send it.
-            // The prompt says "Saves corrections to manual_correction.json".
-            // It doesn't explicitly say "Loads", but it's implied for "Calibrate Current" (maybe resume work).
-            // For now, I'll start empty or I could try to load it.
-            // I'll skip loading manual_correction.json for now to keep it simple unless required.
+            // Manual corrections could be loaded here if needed in the future.
         }).catch((e: any) => {
             setLoading(false);
             setError(String(e));
@@ -165,7 +164,7 @@ export default function CalibrateCurrent() {
             drawPoint(auto.right_tb_top_x, auto.right_tb_top_y, "magenta", 3);
             drawPoint(auto.right_tb_bottom_x, auto.right_tb_bottom_y, "magenta", 3);
 
-            // 3. Final Centers (Yellow) - Use getAutoCoords to handle legacy keys if needed, but prioritize new ones
+            // 3. Final Centers (Yellow)
             const { x: lx, y: ly } = getAutoCoords(auto, "left");
             const { x: rx, y: ry } = getAutoCoords(auto, "right");
 
@@ -206,11 +205,33 @@ export default function CalibrateCurrent() {
 
         const onLoaded = () => {
             syncCanvasSize();
-            vid.currentTime = currentFrame / FPS;
+
+            // Estimate FPS from trackingData length and video duration if possible
+            let fps = DEFAULT_FPS;
+            if (vid.duration && trackingData.length > 0) {
+                const estimatedFPS = trackingData.length / vid.duration;
+                if (isFinite(estimatedFPS) && estimatedFPS > 0) {
+                    fps = estimatedFPS;
+                }
+            }
+            setVideoFPS(fps);
+
+            // Seek video to match currentFrame with this FPS estimate
+            try {
+                vid.currentTime = currentFrame / fps;
+            } catch {
+                // ignore
+            }
+
             drawOverlay();
         };
-        const onSeeked = () => drawOverlay();
-        const onTime = () => drawOverlay();
+
+        const onSeeked = () => {
+            drawOverlay();
+        };
+        const onTime = () => {
+            drawOverlay();
+        };
         const onError = () => {
             const err = vid.error;
             const msg = err
@@ -235,24 +256,26 @@ export default function CalibrateCurrent() {
             vid.removeEventListener("timeupdate", onTime);
             vid.removeEventListener("error", onError);
         };
-    }, [videoSrc, currentFrame]);
+    }, [videoSrc, currentFrame, trackingData]);
 
     // Redraw overlays when data changes
     useEffect(() => {
         drawOverlay();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [manualMarks, trackingData, selectedEye, currentFrame, videoSrc]);
 
     const seekToFrame = (f: number) => {
         const vid = videoRef.current;
         if (!vid) return;
+
         // Clamp
-        const durationFrames = vid.duration ? Math.floor(vid.duration * FPS) : 0;
+        const durationFrames = vid.duration ? Math.floor(vid.duration * videoFPS) : 0;
         const max = trackingData.length > 0 ? trackingData.length - 1 : Math.max(durationFrames - 1, 0);
         const target = Math.max(0, Math.min(f, max));
 
         setCurrentFrame(target);
         try {
-            vid.currentTime = target / FPS;
+            vid.currentTime = target / videoFPS;
         } catch {
             // If metadata isn't ready yet, we'll seek once it is.
         }
@@ -292,30 +315,68 @@ export default function CalibrateCurrent() {
         let lSum = 0, lCount = 0;
         let rSum = 0, rCount = 0;
 
-        // Iterate over manual marks
+        let lSumPct = 0, lCountPct = 0;
+        let rSumPct = 0, rCountPct = 0;
+
         Object.values(manualMarks).forEach(mark => {
-            const auto = trackingData[mark.frame];
+            const auto = trackingData[mark.frame] as any;
             if (!auto) return;
 
             let l_err: number | null = null;
             let r_err: number | null = null;
+            let l_err_pct: number | null = null;
+            let r_err_pct: number | null = null;
 
             const { x: autoLx, y: autoLy } = getAutoCoords(auto, "left");
             const { x: autoRx, y: autoRy } = getAutoCoords(auto, "right");
 
+            // ----- Left eye -----
             if (mark.lx !== undefined && mark.ly !== undefined && autoLx !== undefined && autoLy !== undefined) {
-                l_err = Math.sqrt(Math.pow(mark.lx - autoLx, 2) + Math.pow(mark.ly - autoLy, 2));
+                const dx = mark.lx - autoLx;
+                const dy = mark.ly - autoLy;
+                l_err = Math.sqrt(dx * dx + dy * dy);
+
+                const diam = auto.left_iris_diameter;
+                if (diam && isFinite(diam) && diam > 0) {
+                    l_err_pct = (l_err / diam) * 100;
+                }
+
                 lSum += l_err;
                 lCount++;
+
+                if (l_err_pct !== null) {
+                    lSumPct += l_err_pct;
+                    lCountPct++;
+                }
             }
 
+            // ----- Right eye -----
             if (mark.rx !== undefined && mark.ry !== undefined && autoRx !== undefined && autoRy !== undefined) {
-                r_err = Math.sqrt(Math.pow(mark.rx - autoRx, 2) + Math.pow(mark.ry - autoRy, 2));
+                const dx = mark.rx - autoRx;
+                const dy = mark.ry - autoRy;
+                r_err = Math.sqrt(dx * dx + dy * dy);
+
+                const diam = auto.right_iris_diameter;
+                if (diam && isFinite(diam) && diam > 0) {
+                    r_err_pct = (r_err / diam) * 100;
+                }
+
                 rSum += r_err;
                 rCount++;
+
+                if (r_err_pct !== null) {
+                    rSumPct += r_err_pct;
+                    rCountPct++;
+                }
             }
 
-            results.push({ frame: mark.frame, l_error: l_err, r_error: r_err });
+            results.push({
+                frame: mark.frame,
+                l_error: l_err,
+                r_error: r_err,
+                l_error_pct: l_err_pct,
+                r_error_pct: r_err_pct
+            });
         });
 
         results.sort((a, b) => a.frame - b.frame);
@@ -324,20 +385,17 @@ export default function CalibrateCurrent() {
             l: lCount ? lSum / lCount : 0,
             r: rCount ? rSum / rCount : 0
         });
+
+        // Optionally log iris-relative averages
+        if (lCountPct || rCountPct) {
+            console.log("Average Left Error (% iris diameter):", lCountPct ? lSumPct / lCountPct : 0);
+            console.log("Average Right Error (% iris diameter):", rCountPct ? rSumPct / rCountPct : 0);
+        }
     };
 
     const saveCorrections = async () => {
         if (!selectedFolder) return;
-        // Save to manual_correction.json in the folder
-        // We can use ipc annotation:save but that saves to _annotation.json
-        // We might need a generic save or use node fs via ipc.
-        // Let's use `saveJSON` (browser download) as fallback or implement a new IPC?
-        // The prompt says "Saves corrections to manual_correction.json".
-        // `annotation:save` in main.ts does: `videoPath.replace(".mp4", "_annotation.json")`.
-        // That's not what we want.
-        // I should probably use `saveJSON` to download it, or add a new one?
-        // "Saves corrections to manual_correction.json" - usually implies writing to disk on backend if it's an electron app.
-        // I'll use `saveJSON` for now. It works.
+        // Save to manual_correction.json in the folder (download via browser for now)
         saveJSON("manual_correction.json", Object.values(manualMarks));
     };
 
@@ -368,8 +426,9 @@ export default function CalibrateCurrent() {
                     {/* Zoom Controls Overlay */}
                     <div className="absolute top-4 right-4 z-10 flex gap-2 bg-black/50 p-2 rounded backdrop-blur-sm">
                         <button
-                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20"
+                            className="px-2 py-1 bg-gray-700 rounded hover:bg-gray-600 disabled:opacity-50"
                             onClick={() => setZoomLevel(Math.max(0.5, zoomLevel - 0.5))}
+                            disabled={zoomLevel <= 0.5}
                         >
                             -
                         </button>
@@ -377,13 +436,14 @@ export default function CalibrateCurrent() {
                             {Math.round(zoomLevel * 100)}%
                         </span>
                         <button
-                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20"
+                            className="px-2 py-1 bg-gray-700 rounded hover:bg-gray-600 disabled:opacity-50"
                             onClick={() => setZoomLevel(Math.min(5, zoomLevel + 0.5))}
+                            disabled={zoomLevel >= 5}
                         >
                             +
                         </button>
                         <button
-                            className="px-2 py-1 bg-white/10 text-white rounded hover:bg-white/20 ml-2"
+                            className="px-2 py-1 bg-gray-700 rounded hover:bg-gray-600 text-xs ml-2"
                             onClick={() => setZoomLevel(1)}
                         >
                             Reset
@@ -440,6 +500,9 @@ export default function CalibrateCurrent() {
                         <div className="text-xs text-gray-500 text-center">
                             Frame {currentFrame} / {trackingData.length}
                         </div>
+                        <div className="text-xs text-gray-500 text-center">
+                            FPS (estimated): {videoFPS.toFixed(2)}
+                        </div>
                     </div>
 
                     <div className="space-y-2">
@@ -495,17 +558,29 @@ export default function CalibrateCurrent() {
                             <table className="w-full text-xs text-left">
                                 <thead className="bg-gray-100 sticky top-0">
                                     <tr>
-                                        <th className="p-2">Frame</th>
-                                        <th className="p-2">L Err</th>
-                                        <th className="p-2">R Err</th>
+                                        <th className="p-2 text-left">Frame</th>
+                                        <th className="p-2 text-left">L Err (px)</th>
+                                        <th className="p-2 text-left">R Err (px)</th>
+                                        <th className="p-2">L Err (% iris)</th>
+                                        <th className="p-2">R Err (% iris)</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {comparison.map(c => (
-                                        <tr key={c.frame} className="border-t hover:bg-gray-50 cursor-pointer" onClick={() => seekToFrame(c.frame)}>
+                                        <tr
+                                            key={c.frame}
+                                            className="border-t hover:bg-gray-50 cursor-pointer"
+                                            onClick={() => seekToFrame(c.frame)}
+                                        >
                                             <td className="p-2">{c.frame}</td>
                                             <td className="p-2">{c.l_error ? c.l_error.toFixed(1) : "-"}</td>
                                             <td className="p-2">{c.r_error ? c.r_error.toFixed(1) : "-"}</td>
+                                            <td className="p-2">
+                                                {c.l_error_pct != null ? c.l_error_pct.toFixed(1) + "%" : "-"}
+                                            </td>
+                                            <td className="p-2">
+                                                {c.r_error_pct != null ? c.r_error_pct.toFixed(1) + "%" : "-"}
+                                            </td>
                                         </tr>
                                     ))}
                                 </tbody>
