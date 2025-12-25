@@ -166,6 +166,7 @@ ipcMain.handle(
       });
       trackerProc.on("close", (code) => {
         lastExitCode = typeof code === "number" ? code : null;
+        trackerProc = null;
         win?.webContents.send("tracking:exit", lastExitCode ?? -1);
       });
 
@@ -290,26 +291,26 @@ if (!gotLock) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
 
-  protocol.registerFileProtocol("media", (request, callback) => {
-    try {
-      const u = new URL(request.url);
-      // If hostname is present (e.g., media://users/...), stitch it back into the path
-      let filePath = decodeURIComponent(u.pathname);
-      if (u.hostname && u.hostname !== "localhost") {
-        filePath = `/${u.hostname}${filePath}`;
+    protocol.registerFileProtocol("media", (request, callback) => {
+      try {
+        const u = new URL(request.url);
+        // If hostname is present (e.g., media://users/...), stitch it back into the path
+        let filePath = decodeURIComponent(u.pathname);
+        if (u.hostname && u.hostname !== "localhost") {
+          filePath = `/${u.hostname}${filePath}`;
+        }
+        if (process.platform === "win32") {
+          filePath = filePath.replace(/^\/([A-Za-z]:)/, "$1");
+        }
+        filePath = path.normalize(filePath);
+        const exists = fs.existsSync(filePath);
+        console.log("[media] load", filePath, "exists:", exists);
+        return callback({ path: filePath });
+      } catch (error) {
+        console.error("[media] failed to resolve", error);
+        // @ts-ignore
+        return callback(404);
       }
-      if (process.platform === "win32") {
-        filePath = filePath.replace(/^\/([A-Za-z]:)/, "$1");
-      }
-      filePath = path.normalize(filePath);
-      const exists = fs.existsSync(filePath);
-      console.log("[media] load", filePath, "exists:", exists);
-      return callback({ path: filePath });
-    } catch (error) {
-      console.error("[media] failed to resolve", error);
-      // @ts-ignore
-      return callback(404);
-    }
     });
 
     createWindow();
