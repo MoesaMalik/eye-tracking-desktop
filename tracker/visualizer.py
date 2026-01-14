@@ -10,6 +10,7 @@ VIS_COLORS = {
     'extreme_lr': (0, 165, 255),  # left/right extrema (orange)
     'extreme_tb': (255, 0, 255),  # top/bottom extrema (magenta)
     'roi_box': (0, 255, 0),  # ROI rectangle
+    'head_ok': (0, 220, 0),
 }
 
 def draw_overlay(frame, data, total_frames):
@@ -47,3 +48,10 @@ def draw_overlay(frame, data, total_frames):
     # just a hint about colors
     cv2.putText(frame, "Green=MP center  Yellow=Final center  Orange=LR edges  Magenta=TB edges",
                 (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, VIS_COLORS['text'], 1)
+
+    if data.get('head_status') == "READY":
+        w = frame.shape[1]
+        x = max(10, min(620, w - 20))
+        cv2.circle(frame, (x, 20), 6, VIS_COLORS['head_ok'], -1)
+        cv2.putText(frame, "Head OK", (x + 10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                    VIS_COLORS['head_ok'], 1)

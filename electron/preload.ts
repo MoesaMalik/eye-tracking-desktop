@@ -27,6 +27,17 @@ contextBridge.exposeInMainWorld("nativeApi", {
   invoke: (ch: string, ...args: any[]) => ipcRenderer.invoke(ch, ...args),
 });
 
+/* -------- Head positioning bridge -------- */
+contextBridge.exposeInMainWorld("startHeadPosition", (opts: { cam?: number; fps?: number; script?: string; jsonl?: boolean } = {}) =>
+  ipcRenderer.invoke("head_position:start", opts)
+);
+contextBridge.exposeInMainWorld("stopHeadPosition", () =>
+  ipcRenderer.invoke("head_position:stop")
+);
+contextBridge.exposeInMainWorld("onHeadPositionUpdate", (cb: (payload: any) => void) =>
+  subscribe("head_position:update", cb)
+);
+
 /* -------- Optional thin ipcRenderer exposure -------- */
 contextBridge.exposeInMainWorld("ipcRenderer", {
   on(channel: string, listener: (event: unknown, ...args: any[]) => void) {

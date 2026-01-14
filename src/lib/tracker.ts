@@ -8,6 +8,29 @@ export type TrackerStartOptions = {
   preview?: boolean;
 };
 
+export type HeadPositionStatus = "NOT_DETECTED" | "ALIGNING" | "STABILIZING" | "READY";
+
+export type HeadPositionUpdate = {
+  type: "head_position";
+  ts: number;
+  status: HeadPositionStatus;
+  instruction: string;
+  progress: number;
+  metrics: {
+    center: [number, number] | null;
+    size: number | null;
+    yaw: number | null;
+    pitch: number | null;
+  };
+};
+
+export type HeadPositionStartOptions = {
+  cam?: number;
+  fps?: number;
+  script?: string;
+  jsonl?: boolean;
+};
+
 export async function startTracker(
   opts: TrackerStartOptions = {}
 ): Promise<{ ok: boolean; message: string }> {
@@ -45,4 +68,30 @@ export function subscribeTrackerExit(listener: (code: number) => void): () => vo
 export async function openTrackerOutput(): Promise<{ ok: boolean; path: string }> {
   if (window.tracker?.openOutput) return window.tracker.openOutput();
   return { ok: false, path: "" };
+}
+
+export async function startHeadPosition(
+  opts: HeadPositionStartOptions = {}
+): Promise<{ ok: boolean; message: string }> {
+  if (window.startHeadPosition) return window.startHeadPosition(opts);
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke("head_position:start", opts);
+  return { ok: false, message: "IPC not available" };
+}
+
+export async function stopHeadPosition(): Promise<{ ok: boolean; message: string }> {
+  if (window.stopHeadPosition) return window.stopHeadPosition();
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke("head_position:stop");
+  return { ok: false, message: "IPC not available" };
+}
+
+export function subscribeHeadPosition(
+  listener: (payload: HeadPositionUpdate) => void
+): () => void {
+  if (window.onHeadPositionUpdate) return window.onHeadPositionUpdate(listener);
+  if (window.ipcRenderer?.on && window.ipcRenderer?.off) {
+    const wrapped = (_event: unknown, payload: HeadPositionUpdate) => listener(payload);
+    window.ipcRenderer.on("head_position:update", wrapped);
+    return () => window.ipcRenderer?.off?.("head_position:update", wrapped);
+  }
+  return () => {};
 }

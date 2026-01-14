@@ -47,5 +47,22 @@ public/
 
 tracker/
   main.py          # record/fallback + MediaPipe analysis
+  live_head_position.py # live head positioning JSONL stream
+  head_positioning.py # head positioning logic
   requirements.txt # Python deps
   sample.mp4       # used if no webcam
+
+## Live Head Positioning (UI gating)
+
+The Electron UI starts a live head positioning process while on the **Run Test** or **Recorder** pages.
+It emits one JSON object per line on stdout and is used to gate the Start buttons until READY.
+
+**CLI**
+```bash
+python -m tracker.live_head_position --cam 0 --fps 30
+```
+
+**Message format (JSONL)**
+```json
+{"type":"head_position","ts":1700000000.123,"status":"ALIGNING","instruction":"Move right","progress":0.35,"metrics":{"center":[0.52,0.48],"size":0.24,"yaw":null,"pitch":null}}
+```

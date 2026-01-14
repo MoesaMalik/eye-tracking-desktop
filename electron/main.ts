@@ -39,6 +39,8 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 let win: BrowserWindow | null = null;
 let trackerProc: ChildProcessWithoutNullStreams | null = null;
 let lastExitCode: number | null = null;
+let headPositionProc: ChildProcessWithoutNullStreams | null = null;
+let headPositionBuffer = "";
 
 function commandExists(cmd: string) {
   try {
@@ -108,7 +110,10 @@ function createWindow() {
   }
 
   win.once("ready-to-show", () => win?.show());
-  win.on("closed", () => (win = null));
+  win.on("closed", () => {
+    win = null;
+    stopHeadPositionProcess();
+  });
 }
 
 /* -------------------- Tracker IPC -------------------- */
@@ -199,6 +204,97 @@ ipcMain.handle("tracking:open-output", async () => {
   } catch {
     return { ok: false, path: outDir };
   }
+});
+
+/* -------------------- Head Position IPC -------------------- */
+
+function stopHeadPositionProcess() {
+  if (headPositionProc && !headPositionProc.killed) {
+    try {
+      headPositionProc.kill();
+    } catch {
+      // ignore
+    }
+  }
+  headPositionProc = null;
+  headPositionBuffer = "";
+}
+
+function handleHeadPositionStdout(chunk: Buffer) {
+  headPositionBuffer += chunk.toString();
+  const lines = headPositionBuffer.split(/\r?\n/);
+  headPositionBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const payload = JSON.parse(trimmed);
+      if (payload?.type === "head_position") {
+        win?.webContents.send("head_position:update", payload);
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+}
+
+ipcMain.handle(
+  "head_position:start",
+  async (_e, opts: { cam?: number; fps?: number; script?: string; jsonl?: boolean } = {}) => {
+    if (headPositionProc && !headPositionProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = opts.script
+      ? path.isAbsolute(opts.script)
+        ? opts.script
+        : path.join(process.env.APP_ROOT!, opts.script)
+      : path.join(process.env.APP_ROOT!, "tracker", "live_head_position.py");
+
+    const args = [scriptPath];
+    if (typeof opts.cam === "number") {
+      args.push("--cam", String(opts.cam));
+    }
+    if (typeof opts.fps === "number") {
+      args.push("--fps", String(opts.fps));
+    }
+    if (opts.jsonl === false) {
+      args.push("--no-jsonl");
+    }
+
+    try {
+      headPositionProc = spawn(python, args, {
+        cwd: process.env.APP_ROOT!,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+        },
+      });
+
+      headPositionProc.stdout.on("data", handleHeadPositionStdout);
+      headPositionProc.stderr.on("data", (buf) => {
+        const msg = buf.toString();
+        if (msg.trim()) {
+          console.warn("[head_position]", msg.trim());
+        }
+      });
+      headPositionProc.on("close", () => {
+        headPositionProc = null;
+        headPositionBuffer = "";
+      });
+
+      return { ok: true, message: "started" };
+    } catch (err: any) {
+      headPositionProc = null;
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle("head_position:stop", async () => {
+  stopHeadPositionProcess();
+  return { ok: true, message: "stopped" };
 });
 
 
@@ -314,6 +410,10 @@ if (!gotLock) {
     });
 
     createWindow();
+  });
+
+  app.on("before-quit", () => {
+    stopHeadPositionProcess();
   });
 
   app.on("window-all-closed", () => {

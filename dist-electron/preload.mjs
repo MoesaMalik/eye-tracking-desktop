@@ -16,6 +16,18 @@ electron.contextBridge.exposeInMainWorld("tracker", {
 electron.contextBridge.exposeInMainWorld("nativeApi", {
   invoke: (ch, ...args) => electron.ipcRenderer.invoke(ch, ...args)
 });
+electron.contextBridge.exposeInMainWorld(
+  "startHeadPosition",
+  (opts = {}) => electron.ipcRenderer.invoke("head_position:start", opts)
+);
+electron.contextBridge.exposeInMainWorld(
+  "stopHeadPosition",
+  () => electron.ipcRenderer.invoke("head_position:stop")
+);
+electron.contextBridge.exposeInMainWorld(
+  "onHeadPositionUpdate",
+  (cb) => subscribe("head_position:update", cb)
+);
 electron.contextBridge.exposeInMainWorld("ipcRenderer", {
   on(channel, listener) {
     const wrapped = (event, ...args) => listener(event, ...args);
