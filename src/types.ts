@@ -14,3 +14,34 @@ export type SessionSummary = {
   startedAt: string;
   endedAt?: string;
 };
+
+export type RecordingFolder = {
+  name: string;
+  path: string;
+  createdAt: string;
+};
+
+export type FrameData = {
+  frame: number;
+  timestamp: number;
+  lx: number;
+  ly: number;
+  rx: number;
+  ry: number;
+};
+
+export type ManualMark = {
+  frame: number;
+  lx?: number;
+  ly?: number;
+  rx?: number;
+  ry?: number;
+};
+
+export type ComparisonResult = {
+  frame: number;
+  l_error: number | null;
+  r_error: number | null;
+  l_error_pct?: number | null; // left error as % of iris diameter
+  r_error_pct?: number | null; // right error as % of iris diameter
+};

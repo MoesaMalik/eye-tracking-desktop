@@ -1,8 +1,19 @@
-import { ipcMain, shell, app, protocol, BrowserWindow, nativeImage, Menu } from "electron";
+import { protocol, ipcMain, shell, app, BrowserWindow, nativeImage, Menu } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "media",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
+  }
+]);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 process.env.APP_ROOT = path.join(__dirname, "..");
 const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
@@ -93,6 +104,9 @@ ipcMain.handle(
     if (opts.preview === false) {
       args.push("--no-preview");
     }
+    if (opts.outDir) {
+      args.push("--output-dir", opts.outDir);
+    }
     try {
       trackerProc = spawn(python, args, {
         cwd,
@@ -160,6 +174,42 @@ ipcMain.handle("annotation:save", async (_e, { videoPath, data }) => {
     return { ok: false, error: e.message };
   }
 });
+ipcMain.handle("recordings:list-folders", async () => {
+  const recDir = path.join(process.env.APP_ROOT, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  const items = fs.readdirSync(recDir);
+  const folders = items.filter((item) => {
+    const itemPath = path.join(recDir, item);
+    return fs.statSync(itemPath).isDirectory();
+  });
+  return folders.map((name) => ({
+    name,
+    path: path.join(recDir, name),
+    createdAt: fs.statSync(path.join(recDir, name)).birthtime
+  })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+});
+ipcMain.handle("session:load-data", async (_e, folderPath) => {
+  if (!fs.existsSync(folderPath)) return { ok: false, error: "Folder not found" };
+  const files = fs.readdirSync(folderPath);
+  const videoFile = files.find((f) => f.endsWith(".mp4") && !f.includes("_tracked"));
+  const trackingFile = files.find((f) => f.endsWith("_tracking_data.json"));
+  if (!videoFile) return { ok: false, error: "No video file found" };
+  const videoPath = path.join(folderPath, videoFile);
+  const trackingPath = trackingFile ? path.join(folderPath, trackingFile) : null;
+  let trackingData = null;
+  if (trackingPath) {
+    try {
+      trackingData = JSON.parse(fs.readFileSync(trackingPath, "utf-8"));
+    } catch (e) {
+      console.error("Failed to parse tracking data", e);
+    }
+  }
+  return {
+    ok: true,
+    videoPath,
+    trackingData
+  };
+});
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -175,11 +225,21 @@ if (!gotLock) {
       process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
     }
     protocol.registerFileProtocol("media", (request, callback) => {
-      const url = request.url.replace("media://", "");
       try {
-        return callback(decodeURIComponent(url));
+        const u = new URL(request.url);
+        let filePath = decodeURIComponent(u.pathname);
+        if (u.hostname && u.hostname !== "localhost") {
+          filePath = `/${u.hostname}${filePath}`;
+        }
+        if (process.platform === "win32") {
+          filePath = filePath.replace(/^\/([A-Za-z]:)/, "$1");
+        }
+        filePath = path.normalize(filePath);
+        const exists = fs.existsSync(filePath);
+        console.log("[media] load", filePath, "exists:", exists);
+        return callback({ path: filePath });
       } catch (error) {
-        console.error(error);
+        console.error("[media] failed to resolve", error);
         return callback(404);
       }
     });

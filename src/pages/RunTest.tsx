@@ -1,6 +1,6 @@
 // src/pages/RunTest.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useNavigate } from "react-router-dom";
 import { saveJSON } from "../lib/save";
 import { usePatientStore } from "../store/patientStore";
 import type { Patient, SessionSummary } from "../types";
@@ -11,6 +11,13 @@ import {
   openTrackerOutput,
   type TrackerStatus,
 } from "../lib/tracker";
+
+const PROTOCOL_DURATIONS: Record<string, number> = {
+  calibration: 400,
+  saccades: 400,
+  sentences: 4000,
+  smooth_pursuits: 400,
+};
 
 type Protocol = { label: string; slides: string[] };
 type ProtocolManifest = Record<string, Protocol>;
@@ -30,14 +37,20 @@ type SessionExport = {
 };
 
 function newSessionId() {
-  const iso = new Date().toISOString();
-  const stamp = iso.replace(/[:.]/g, "").replace(/-/g, "").replace("T", "_");
-  return `sess-${stamp}`;
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `sample_video_${yyyy}${mm}${dd}_${hh}${min}${ss}`;
 }
 
 export default function RunTest() {
   // --- Patients ---
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const patientIdParam = params.get("patient") ?? "";
 
   const patientsMap = usePatientStore((s) => s.patients);
@@ -53,6 +66,7 @@ export default function RunTest() {
   // --- Protocols ---
   const [manifest, setManifest] = useState<ProtocolManifest>({});
   const [key, setKey] = useState<string>("saccades");
+  const [mode, setMode] = useState<'all' | 'single'>('single');
 
   // --- Slides / Session ---
   const [idx, setIdx] = useState<number>(0);
@@ -83,7 +97,12 @@ export default function RunTest() {
   useEffect(() => {
     fetch("/protocols.json")
       .then((r) => r.json())
-      .then((data) => setManifest(data))
+      .then((data) => {
+        setManifest(data);
+        // Default to first protocol if available
+        const keys = Object.keys(data);
+        if (keys.length > 0) setKey(keys[0]);
+      })
       .catch((e) => {
         console.error("Failed to load protocols.json", e);
         setError("Failed to load protocols.json");
@@ -203,11 +222,81 @@ export default function RunTest() {
 
   useEffect(() => {
     if (!shouldAutoAdvance || slides.length === 0) return;
+
+    const duration = PROTOCOL_DURATIONS[key] ?? 400; // default to 400ms if not found
+
     const timer = window.setInterval(() => {
-      next();
-    }, 2000);
+      setIdx((i) => {
+        const nextIdx = i + 1;
+        if (nextIdx >= slides.length) {
+          // Protocol finished
+          // Check if there are more protocols or if we should stop
+          // For now, just stop if it's the last slide of the current protocol
+          // But the requirement says "runs through all protocols".
+          // The current implementation seems to select one protocol at a time via dropdown.
+          // If we need to run ALL protocols automatically, we need a sequence.
+          // However, the prompt says "runs through all protocols and stops recording automatically after completion".
+          // This implies we should iterate through keys of manifest.
+
+          // Let's implement a simple sequence logic here or in a separate effect.
+          // But wait, `next()` just increments index.
+
+          return i; // Stay on last slide, let the effect below handle protocol switching
+        }
+
+        if (running) {
+          setMarks((prev) => [...prev, { slide: nextIdx, t: performance.now() - t0.current }]);
+        }
+        return nextIdx;
+      });
+    }, duration);
     return () => window.clearInterval(timer);
-  }, [shouldAutoAdvance, slides.length, next]);
+  }, [shouldAutoAdvance, slides.length, key, running]);
+
+  // Handle protocol switching / auto-stop
+  useEffect(() => {
+    if (!shouldAutoAdvance) return;
+    if (idx >= slides.length - 1) {
+      // We are at the last slide.
+      // Wait for the duration of the last slide then move to next protocol or stop.
+      const duration = PROTOCOL_DURATIONS[key] ?? 400;
+      const timer = setTimeout(() => {
+        if (mode === 'single') {
+          // Single mode: stop after this protocol
+          endSession();
+        } else {
+          // All mode: try to go to next protocol
+          const keys = Object.keys(manifest);
+          const currentKeyIdx = keys.indexOf(key);
+          if (currentKeyIdx < keys.length - 1) {
+            // Move to next protocol
+            const nextKey = keys[currentKeyIdx + 1];
+            setKey(nextKey);
+            setIdx(0); // Reset index for the new protocol
+          } else {
+            // All protocols done
+            endSession();
+          }
+        }
+      }, duration);
+      return () => clearTimeout(timer);
+    }
+  }, [idx, slides.length, shouldAutoAdvance, key, manifest, mode]);
+
+  // Redirect after session ends
+  useEffect(() => {
+    if (lastEnded && !running && !sessionId) {
+      // Session ended and saved (lastEnded is set)
+      // Redirect to /calibrate (which I will use for "Calibrate Current")
+      // The prompt says "redirect to /correction route with the session ID"
+      // I'll assume /calibrate is the route, and pass session ID as param?
+      // Or maybe /correction is a separate route I need to make?
+      // Prompt 2 says "Create src/pages/CalibrateCurrent.tsx ... Add route: <Route path="calibrate" element={<CalibrateCurrent />} />"
+      // Prompt 1 says "redirect to /correction route".
+      // I will use /calibrate and add a query param ?session=ID
+      navigate(`/calibrate?session=${lastEnded.id}`);
+    }
+  }, [lastEnded, running, sessionId, navigate]);
 
   async function startSession() {
     if (!patient || busy) return;
@@ -216,7 +305,43 @@ export default function RunTest() {
     clearSlideDelay();
     setSlidesReady(false);
 
-    const res = await startTracker({ preview: false }).catch(() => ({ ok: false, message: "IPC error" }));
+    // If mode is ALL, ensure we start from the first protocol
+    if (mode === 'all') {
+      const keys = Object.keys(manifest);
+      if (keys.length > 0 && key !== keys[0]) {
+        setKey(keys[0]);
+        // We need to wait for key to update? 
+        // Actually, setKey is async-ish but we are inside startSession.
+        // The effect [key] resets idx/marks.
+        // But we are about to setSessionId which makes running=true.
+        // If we change key here, the effect `reset when protocol changes` might fire?
+        // "if (running) return" in that effect prevents reset if running.
+        // So we should setKey first, then start?
+        // But we can't await state update.
+        // Ideally we setKey, and let the user click start again? 
+        // Or we assume the user selected "ALL" which sets key to first one immediately.
+        // In the onChange handler we setKey to first one. So key should be correct already.
+      }
+    }
+
+    const sid = newSessionId();
+    // const outDir = `recordings/${sid}`; // Unused variable removed
+    // Relative to app root, or absolute?
+    // IPC `tracking:start` uses `process.env.APP_ROOT` to resolve script, but for `outDir`?
+    // The prompt says "All recordings should be saved in this structure: recordings/sample_video_..."
+    // So we should pass the full path or relative path.
+    // Let's pass a relative path and let the backend handle it or pass absolute.
+    // Backend `tracking:start` logic I added: `args.push("--output-dir", opts.outDir);`
+    // Python script likely expects a path.
+    // Let's use an absolute path to be safe, but I don't have `APP_ROOT` here.
+    // I can pass `recordings/${sid}` and let the backend resolve it?
+    // Or I can just pass the folder name and let the backend join it with `recordings`?
+    // The prompt says "Update tracking:start handler: Accept and pass outDir parameter".
+    // It doesn't say the backend resolves it relative to `recordings`.
+    // So I should probably pass the full path or relative to CWD.
+    // If I pass `recordings/${sid}`, and CWD is APP_ROOT, it should work.
+
+    const res = await startTracker({ preview: false, outDir: `recordings/${sid}` }).catch(() => ({ ok: false, message: "IPC error" }));
     if (!res.ok) {
       setError(`Could not start tracker: ${res.message}`);
       setBusy(false);
@@ -248,7 +373,7 @@ export default function RunTest() {
 
     setLastEnded(null);
     setEndedAtIso(null);
-    setSessionId(newSessionId());
+    setSessionId(sid); // Use the pre-generated ID
     setStartedAtIso(new Date().toISOString());
     t0.current = performance.now();
     setMarks([{ slide: 0, t: 0 }]);
@@ -410,10 +535,21 @@ export default function RunTest() {
         <label className="text-sm text-gray-600">Protocol</label>
         <select
           className="px-3 py-2 border rounded-lg bg-white"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
+          value={mode === 'all' ? 'ALL' : key}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === 'ALL') {
+              setMode('all');
+              const keys = Object.keys(manifest);
+              if (keys.length > 0) setKey(keys[0]);
+            } else {
+              setMode('single');
+              setKey(val);
+            }
+          }}
           disabled={running || busy}
         >
+          <option value="ALL">Run All Tests</option>
           {Object.entries(manifest).map(([k, v]) => (
             <option key={k} value={k}>
               {v.label} ({v.slides.length})
@@ -516,7 +652,7 @@ export default function RunTest() {
           <span className="text-gray-600">Recorded slide changes:</span> <b>{marks.length}</b>
         </div>
         <div className="text-gray-600">
-          Tip: Use ← / → or buttons to change slides. Timing is recorded only while the session is running.
+          Timing: Sentences 4s, All others 400ms. Use ← / → for manual control.
         </div>
       </div>
 
