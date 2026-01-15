@@ -32,6 +32,15 @@ declare global {
     nativeApi?: {
       invoke: (ch: string, ...args: any[]) => Promise<any>;
     };
+
+    startHeadPosition?: (opts?: {
+      cam?: number;
+      fps?: number;
+      script?: string;
+      jsonl?: boolean;
+    }) => Promise<{ ok: boolean; message: string }>;
+    stopHeadPosition?: () => Promise<{ ok: boolean; message: string }>;
+    onHeadPositionUpdate?: (cb: (payload: any) => void) => () => void;
   }
 }
 

@@ -10,6 +10,10 @@ import {
   stopTracker,
   openTrackerOutput,
   type TrackerStatus,
+  startHeadPosition,
+  stopHeadPosition,
+  subscribeHeadPosition,
+  type HeadPositionStatus,
 } from "../lib/tracker";
 
 const PROTOCOL_DURATIONS: Record<string, number> = {
@@ -85,6 +89,9 @@ export default function RunTest() {
   const [error, setError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const slideDelayTimer = useRef<number | null>(null);
+  const [headStatus, setHeadStatus] = useState<HeadPositionStatus>("NOT_DETECTED");
+  const [headInstruction, setHeadInstruction] = useState<string>("Face not detected");
+  const [headProgress, setHeadProgress] = useState<number>(0);
 
   const clearSlideDelay = useCallback(() => {
     if (slideDelayTimer.current !== null) {
@@ -117,6 +124,31 @@ export default function RunTest() {
         setTrackerPid(s.pid);
       })
       .catch(() => { });
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeHeadPosition((payload) => {
+      setHeadStatus(payload.status);
+      setHeadInstruction(payload.instruction ?? "");
+      setHeadProgress(payload.progress ?? 0);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (trackerStatus === "running") {
+      stopHeadPosition().catch(() => {});
+      return;
+    }
+    startHeadPosition({ fps: 20 }).catch(() => {});
+  }, [trackerStatus]);
+
+  useEffect(() => {
+    return () => {
+      stopHeadPosition().catch(() => {});
+    };
   }, []);
 
   const slides = useMemo(() => manifest[key]?.slides ?? [], [manifest, key]);
@@ -299,7 +331,12 @@ export default function RunTest() {
   }, [lastEnded, running, sessionId, navigate]);
 
   async function startSession() {
-    if (!patient || busy) return;
+    if (!patient || busy || headStatus !== "READY") {
+      if (headStatus !== "READY") {
+        setError("Align your head to continue.");
+      }
+      return;
+    }
     setBusy(true);
     setError(null);
     clearSlideDelay();
@@ -341,10 +378,12 @@ export default function RunTest() {
     // So I should probably pass the full path or relative to CWD.
     // If I pass `recordings/${sid}`, and CWD is APP_ROOT, it should work.
 
+    await stopHeadPosition().catch(() => {});
     const res = await startTracker({ preview: false, outDir: `recordings/${sid}` }).catch(() => ({ ok: false, message: "IPC error" }));
     if (!res.ok) {
       setError(`Could not start tracker: ${res.message}`);
       setBusy(false);
+      await startHeadPosition({ fps: 20 }).catch(() => {});
       return;
     }
 
@@ -368,6 +407,7 @@ export default function RunTest() {
     if (trackerInfo.status !== "running") {
       setError("Tracker failed to start (camera not ready).");
       setBusy(false);
+      await startHeadPosition({ fps: 20 }).catch(() => {});
       return;
     }
 
@@ -436,6 +476,7 @@ export default function RunTest() {
       addSessionSummary(summary);
     }
 
+    await startHeadPosition({ fps: 20 }).catch(() => {});
     setBusy(false);
   }
 
@@ -471,6 +512,15 @@ export default function RunTest() {
           ? "bg-amber-100 text-amber-800 border-amber-300"
           : "bg-gray-100 text-gray-800 border-gray-300";
 
+  const headBadge =
+    headStatus === "READY"
+      ? "bg-green-100 text-green-800 border-green-300"
+      : headStatus === "STABILIZING"
+        ? "bg-amber-100 text-amber-800 border-amber-300"
+        : headStatus === "ALIGNING"
+          ? "bg-blue-100 text-blue-800 border-blue-300"
+          : "bg-red-100 text-red-800 border-red-300";
+
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center gap-3">
@@ -479,7 +529,23 @@ export default function RunTest() {
           Tracker: {trackerStatus}
           {typeof trackerPid === "number" ? ` · pid ${trackerPid}` : ""}
         </span>
+        <span className={`text-xs px-2 py-0.5 border rounded ${headBadge}`}>
+          Head: {headStatus}
+        </span>
         {busy && <span className="text-xs text-gray-500">…working</span>}
+      </div>
+
+      <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
+        <div className="text-sm text-gray-700">{headInstruction || "Align your head"}</div>
+        <div className="ml-auto flex items-center gap-2">
+          <div className="w-40 h-2 bg-gray-200 rounded">
+            <div
+              className="h-2 bg-gray-900 rounded"
+              style={{ width: `${Math.round(headProgress * 100)}%` }}
+            />
+          </div>
+          <span className="text-xs text-gray-500">{Math.round(headProgress * 100)}%</span>
+        </div>
       </div>
 
       {error && (
@@ -561,8 +627,14 @@ export default function RunTest() {
           <button
             className="ml-3 px-3 py-2 rounded-lg bg-gray-900 text-white disabled:opacity-60"
             onClick={startSession}
-            disabled={!patient || slides.length === 0 || busy}
-            title={!patient ? "Pick a patient first" : ""}
+            disabled={!patient || slides.length === 0 || busy || headStatus !== "READY"}
+            title={
+              !patient
+                ? "Pick a patient first"
+                : headStatus !== "READY"
+                  ? "Align your head before starting"
+                  : ""
+            }
           >
             Start Session
           </button>

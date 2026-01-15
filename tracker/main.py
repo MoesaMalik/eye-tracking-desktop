@@ -36,6 +36,7 @@ try:
     )
     from .visualizer import draw_overlay, VIS_COLORS
     from .filter import OneEuroFilter
+    from .head_positioning import HeadPositioner
 except (ImportError, ValueError):
     # Direct imports (when running as a script, e.g. python tracker/main.py)
     from camera import record_video
@@ -45,6 +46,7 @@ except (ImportError, ValueError):
     )
     from visualizer import draw_overlay, VIS_COLORS
     from filter import OneEuroFilter
+    from head_positioning import HeadPositioner
 
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 
@@ -56,7 +58,7 @@ def _handle_stop(signum, _frame):
     print(f"\n[INFO] Received signal {signum}; stopping recording…")
 
 # --------- Configuration ----------
-CAM_INDEX = 1
+CAM_INDEX = 0
 
 # Confidence threshold for "hold last good value"
 MIN_CONF = 0.4
@@ -166,6 +168,7 @@ class EyeTracker:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
+        head_positioner = HeadPositioner()
 
         output_video_path = self.output_dir / f"{self.video_path.stem}_tracked.mp4"
 
@@ -202,9 +205,11 @@ class EyeTracker:
                 'face_detected': False
             }
 
+            head_result = None
             if result and result.multi_face_landmarks:
                 lms = result.multi_face_landmarks[0].landmark
                 frame_data['face_detected'] = True
+                head_result = head_positioner.assess(lms)
                 
                 # Check Blinks (EAR)
                 ear_l = calculate_ear(lms, EAR_LEFT_IDX, self.width, self.height)
@@ -585,11 +590,16 @@ class EyeTracker:
                     frame_data['gaze_x'] = (frame_data['left_center_x'] + frame_data['right_center_x']) / 2.0
                     frame_data['gaze_y'] = (frame_data['left_center_y'] + frame_data['right_center_y']) / 2.0
 
-                draw_overlay(frame, frame_data, self.total_frames)
-
             else:
+                head_result = head_positioner.assess(None)
                 cv2.putText(frame, "NO FACE", (self.width // 2 - 80, self.height // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+
+            if head_result:
+                frame_data['head_status'] = head_result.get('status')
+                frame_data['head_progress'] = head_result.get('progress')
+
+            draw_overlay(frame, frame_data, self.total_frames)
 
             video_writer.write(frame)
             self.tracking_data.append(frame_data)
