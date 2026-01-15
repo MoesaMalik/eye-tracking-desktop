@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams, useNavigate } from "react-router-dom";
 import { saveJSON } from "../lib/save";
 import { usePatientStore } from "../store/patientStore";
-import type { Patient, SessionSummary } from "../types";
+import type { Patient, SessionSummary, CalibrationSlideInfo } from "../types";
 import {
   getTrackerStatus,
   startTracker,
@@ -19,8 +19,58 @@ const PROTOCOL_DURATIONS: Record<string, number> = {
   smooth_pursuits: 400,
 };
 
-type Protocol = { label: string; slides: string[] };
+// Protocol type with optional isCalibration flag
+type Protocol = { label: string; slides: string[]; isCalibration?: boolean };
 type ProtocolManifest = Record<string, Protocol>;
+
+/**
+ * Parses a calibration slide filename to extract target coordinates.
+ * Format: "<x>-<y>.png" → { x, y }
+ * Returns null for center.png or invalid filenames.
+ * 
+ * Example: "/assets/protocols/calibration/704-540.png" → { x: 704, y: 540 }
+ */
+function parseCalibrationSlide(slidePath: string): { x: number; y: number } | null {
+  // Extract filename from path
+  const filename = slidePath.split('/').pop() ?? '';
+
+  // center.png is not a target slide
+  if (filename === 'center.png') return null;
+
+  // Match pattern: digits-digits.png
+  const match = filename.match(/^(\d+)-(\d+)\.png$/);
+  if (!match) return null;
+
+  return {
+    x: parseInt(match[1], 10),
+    y: parseInt(match[2], 10)
+  };
+}
+
+/**
+ * Builds calibration slide metadata array from slide paths.
+ * Tracks which slides are CENTER vs TARGET and assigns target indices.
+ */
+function buildCalibrationSlideInfo(slides: string[]): CalibrationSlideInfo[] {
+  let targetIndex = 0;
+  return slides.map(path => {
+    const coords = parseCalibrationSlide(path);
+    if (coords === null) {
+      // This is a CENTER slide
+      return { path, isCenter: true };
+    } else {
+      // This is a TARGET slide
+      const info: CalibrationSlideInfo = {
+        path,
+        isCenter: false,
+        targetX: coords.x,
+        targetY: coords.y,
+        targetIndex: targetIndex++
+      };
+      return info;
+    }
+  });
+}
 
 type SlideMark = { slide: number; t: number }; // ms since session start
 type SessionExport = {
@@ -121,6 +171,19 @@ export default function RunTest() {
 
   const slides = useMemo(() => manifest[key]?.slides ?? [], [manifest, key]);
   const current = slides[idx];
+
+  // --- Calibration Protocol State ---
+  // Check if current protocol is calibration (has isCalibration flag or key is "calibration")
+  const isCalibrationProtocol = key === "calibration" || manifest[key]?.isCalibration === true;
+
+  // Build calibration slide metadata (only computed when protocol is calibration)
+  const calibrationSlideInfo = useMemo(() => {
+    if (!isCalibrationProtocol) return [];
+    return buildCalibrationSlideInfo(slides);
+  }, [isCalibrationProtocol, slides]);
+
+  // Get current slide's calibration info (for debugging/display)
+  // const currentCalibInfo = isCalibrationProtocol ? calibrationSlideInfo[idx] : null;
 
   const running = !!sessionId && !endedAtIso;
   const ended = !!endedAtIso;
@@ -298,6 +361,39 @@ export default function RunTest() {
     }
   }, [lastEnded, running, sessionId, navigate]);
 
+  // --- Calibration Event Emission ---
+  // Emit calibration:target event when a TARGET slide becomes visible
+  // CENTER slides (center.png) do NOT emit events
+  useEffect(() => {
+    // Only emit during active calibration sessions
+    if (!isCalibrationProtocol || !running || !sessionId || !slidesReady) return;
+
+    const slideInfo = calibrationSlideInfo[idx];
+    if (!slideInfo) return;
+
+    // Only emit for TARGET slides (not CENTER slides)
+    if (slideInfo.isCenter) {
+      console.log(`[calibration] CENTER slide at idx=${idx}, skipping emit`);
+      return;
+    }
+
+    // Emit calibration target event
+    const payload = {
+      session_id: sessionId,
+      slide_index: slideInfo.targetIndex ?? 0,
+      x: slideInfo.targetX ?? 0,
+      y: slideInfo.targetY ?? 0,
+      slide: slideInfo.path,
+      timestamp_ms: Date.now()
+    };
+
+    console.log(`[calibration] TARGET slide: idx=${idx}, target_index=${payload.slide_index}, (${payload.x}, ${payload.y})`);
+
+    window.calibration?.emitTarget(payload).catch((err) => {
+      console.error("[calibration] failed to emit target:", err);
+    });
+  }, [isCalibrationProtocol, running, sessionId, slidesReady, idx, calibrationSlideInfo]);
+
   async function startSession() {
     if (!patient || busy) return;
     setBusy(true);
@@ -383,6 +479,13 @@ export default function RunTest() {
       setSlidesReady(true);
     }, 10000);
 
+    // Reset calibration targets at session start (if calibration protocol)
+    if (key === "calibration" || manifest[key]?.isCalibration) {
+      window.calibration?.reset().catch((err) => {
+        console.error("[calibration] reset error:", err);
+      });
+    }
+
     setBusy(false);
   }
 
@@ -434,6 +537,20 @@ export default function RunTest() {
         endedAt: endedIso,
       };
       addSessionSummary(summary);
+    }
+
+    // Save calibration targets to JSON file (if calibration protocol)
+    if (key === "calibration" || manifest[key]?.isCalibration) {
+      const sessionDir = `recordings/${sessionId}`;
+      window.calibration?.save(sessionDir).then((res) => {
+        if (res.ok) {
+          console.log(`[calibration] saved ${res.count} targets to ${res.path}`);
+        } else {
+          console.error("[calibration] save failed:", res.error);
+        }
+      }).catch((err) => {
+        console.error("[calibration] save error:", err);
+      });
     }
 
     setBusy(false);

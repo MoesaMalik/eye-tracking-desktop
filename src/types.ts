@@ -45,3 +45,28 @@ export type ComparisonResult = {
   l_error_pct?: number | null; // left error as % of iris diameter
   r_error_pct?: number | null; // right error as % of iris diameter
 };
+
+/**
+ * Calibration target event payload.
+ * Emitted when a calibration TARGET slide becomes visible.
+ */
+export type CalibrationTarget = {
+  session_id: string;    // Session identifier for tracing across sessions
+  slide_index: number;   // Target index (0-11) for grouping during model fitting
+  x: number;             // Target X coordinate (pixels, screen space)
+  y: number;             // Target Y coordinate (pixels, screen space)
+  slide: string;         // Slide path e.g. "/assets/protocols/calibration/704-540.png"
+  timestamp_ms: number;  // Milliseconds since epoch
+};
+
+/**
+ * Extended slide metadata for calibration protocol.
+ * Used internally to track which slides are CENTER vs TARGET.
+ */
+export type CalibrationSlideInfo = {
+  path: string;          // Slide file path
+  isCenter: boolean;     // true = center.png, false = target slide
+  targetX?: number;      // Target X coord (only for targets)
+  targetY?: number;      // Target Y coord (only for targets)
+  targetIndex?: number;  // Target index 0-11 (only for targets)
+};

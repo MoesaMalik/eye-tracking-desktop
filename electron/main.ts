@@ -40,6 +40,17 @@ let win: BrowserWindow | null = null;
 let trackerProc: ChildProcessWithoutNullStreams | null = null;
 let lastExitCode: number | null = null;
 
+// Calibration target storage for active session
+type CalibrationTarget = {
+  session_id: string;
+  slide_index: number;
+  x: number;
+  y: number;
+  slide: string;
+  timestamp_ms: number;
+};
+let calibrationTargets: CalibrationTarget[] = [];
+
 function commandExists(cmd: string) {
   try {
     const checker = process.platform === "win32" ? "where" : "which";
@@ -199,6 +210,52 @@ ipcMain.handle("tracking:open-output", async () => {
   } catch {
     return { ok: false, path: outDir };
   }
+});
+
+
+/* -------------------- Calibration IPC -------------------- */
+
+/**
+ * Receives calibration target events from the renderer.
+ * Called when a TARGET slide (not CENTER) becomes visible.
+ */
+ipcMain.handle("calibration:target", async (_e, payload: CalibrationTarget) => {
+  calibrationTargets.push(payload);
+  console.log(`[calibration] target #${calibrationTargets.length}: (${payload.x}, ${payload.y}) slide_index=${payload.slide_index}`);
+  return { ok: true };
+});
+
+/**
+ * Saves accumulated calibration targets to a JSON file in the session folder.
+ * Called when a calibration session ends.
+ */
+ipcMain.handle("calibration:save", async (_e, sessionDir: string) => {
+  const fullPath = path.isAbsolute(sessionDir)
+    ? sessionDir
+    : path.join(process.env.APP_ROOT!, sessionDir);
+
+  const outPath = path.join(fullPath, "calibration_targets.json");
+  try {
+    // Ensure directory exists
+    fs.mkdirSync(fullPath, { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(calibrationTargets, null, 2));
+    console.log(`[calibration] saved ${calibrationTargets.length} targets to ${outPath}`);
+    const count = calibrationTargets.length;
+    calibrationTargets = []; // Reset for next session
+    return { ok: true, path: outPath, count };
+  } catch (err: any) {
+    console.error("[calibration] save error:", err);
+    return { ok: false, error: String(err?.message ?? err) };
+  }
+});
+
+/**
+ * Resets calibration target storage. Called at session start.
+ */
+ipcMain.handle("calibration:reset", async () => {
+  calibrationTargets = [];
+  console.log("[calibration] reset");
+  return { ok: true };
 });
 
 

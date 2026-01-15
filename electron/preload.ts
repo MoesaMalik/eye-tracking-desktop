@@ -22,6 +22,25 @@ contextBridge.exposeInMainWorld("tracker", {
   openOutput: () => ipcRenderer.invoke("tracking:open-output"),
 });
 
+/* -------- Calibration-specific bridge -------- */
+type CalibrationTarget = {
+  session_id: string;
+  slide_index: number;
+  x: number;
+  y: number;
+  slide: string;
+  timestamp_ms: number;
+};
+
+contextBridge.exposeInMainWorld("calibration", {
+  /** Emit a calibration target event when a TARGET slide becomes visible */
+  emitTarget: (payload: CalibrationTarget) => ipcRenderer.invoke("calibration:target", payload),
+  /** Save calibration targets to JSON file in session folder */
+  save: (sessionDir: string) => ipcRenderer.invoke("calibration:save", sessionDir),
+  /** Reset calibration targets at session start */
+  reset: () => ipcRenderer.invoke("calibration:reset"),
+});
+
 /* -------- Generic invoke fallback (used by lib/tracker.ts) -------- */
 contextBridge.exposeInMainWorld("nativeApi", {
   invoke: (ch: string, ...args: any[]) => ipcRenderer.invoke(ch, ...args),

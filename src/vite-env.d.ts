@@ -32,7 +32,20 @@ declare global {
     nativeApi?: {
       invoke: (ch: string, ...args: any[]) => Promise<any>;
     };
+
+    calibration?: {
+      emitTarget: (payload: {
+        session_id: string;
+        slide_index: number;
+        x: number;
+        y: number;
+        slide: string;
+        timestamp_ms: number;
+      }) => Promise<{ ok: boolean }>;
+      save: (sessionDir: string) => Promise<{ ok: boolean; path?: string; count?: number; error?: string }>;
+      reset: () => Promise<{ ok: boolean }>;
+    };
   }
 }
 
-export {};
+export { };
