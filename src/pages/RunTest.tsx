@@ -22,11 +22,14 @@ const PROTOCOL_DURATIONS: Record<string, number> = {
   sentences: 4000,
   smooth_pursuits: 400,
 };
+const CENTER_MS = 800;
+const TARGET_MS = 1500;
 
 type Protocol = { label: string; slides: string[] };
 type ProtocolManifest = Record<string, Protocol>;
 
 type SlideMark = { slide: number; t: number }; // ms since session start
+type CalibrationTarget = { filename: string; x: number; y: number; timestamp_ms: number };
 type SessionExport = {
   id: string;
   startedAt: string;
@@ -69,7 +72,7 @@ export default function RunTest() {
 
   // --- Protocols ---
   const [manifest, setManifest] = useState<ProtocolManifest>({});
-  const [key, setKey] = useState<string>("saccades");
+  const [key, setKey] = useState<string>("calibration");
   const [mode, setMode] = useState<'all' | 'single'>('single');
 
   // --- Slides / Session ---
@@ -89,6 +92,10 @@ export default function RunTest() {
   const [error, setError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const slideDelayTimer = useRef<number | null>(null);
+  const advanceTimer = useRef<number | null>(null);
+  const calibrationTargetsRef = useRef<CalibrationTarget[]>([]);
+  const calibrationCreatedAtRef = useRef<number | null>(null);
+  const lastLoggedSlideRef = useRef<string | null>(null);
   const [headStatus, setHeadStatus] = useState<HeadPositionStatus>("NOT_DETECTED");
   const [headInstruction, setHeadInstruction] = useState<string>("Face not detected");
   const [headProgress, setHeadProgress] = useState<number>(0);
@@ -100,6 +107,13 @@ export default function RunTest() {
     }
   }, []);
 
+  const clearAdvanceTimer = useCallback(() => {
+    if (advanceTimer.current !== null) {
+      window.clearTimeout(advanceTimer.current);
+      advanceTimer.current = null;
+    }
+  }, []);
+
   // load protocols
   useEffect(() => {
     fetch("/protocols.json")
@@ -108,7 +122,11 @@ export default function RunTest() {
         setManifest(data);
         // Default to first protocol if available
         const keys = Object.keys(data);
-        if (keys.length > 0) setKey(keys[0]);
+        if (data.calibration) {
+          setKey("calibration");
+        } else if (keys.length > 0) {
+          setKey(keys[0]);
+        }
       })
       .catch((e) => {
         console.error("Failed to load protocols.json", e);
@@ -158,6 +176,19 @@ export default function RunTest() {
   const ended = !!endedAtIso;
   const slidesActive = running && trackerStatus === "running";
   const shouldAutoAdvance = slidesActive && slidesReady;
+
+  const getFilename = useCallback((src: string) => src.split("/").pop() ?? src, []);
+
+  const getSlideDurationMs = useCallback(
+    (slideSrc?: string) => {
+      const fallback = PROTOCOL_DURATIONS[key] ?? 400;
+      if (!slideSrc) return fallback;
+      if (key !== "calibration") return fallback;
+      const filename = getFilename(slideSrc);
+      return filename === "center.png" ? CENTER_MS : TARGET_MS;
+    },
+    [key, getFilename]
+  );
 
   const next = useCallback(() => {
     setIdx((i) => {
@@ -237,53 +268,109 @@ export default function RunTest() {
     }
   }, []);
 
+  const writeSessionJson = useCallback(async (filePath: string, data: unknown) => {
+    if (window.nativeApi?.invoke) {
+      return window.nativeApi.invoke("session:write-json", { filePath, data });
+    }
+    if (window.ipcRenderer?.invoke) {
+      return window.ipcRenderer.invoke("session:write-json", { filePath, data });
+    }
+    return { ok: false, error: "IPC not available" };
+  }, []);
+
   useEffect(() => {
     if (!running) {
       exitFullscreen();
       clearSlideDelay();
+      clearAdvanceTimer();
       setSlidesReady(false);
     }
-  }, [running, exitFullscreen, clearSlideDelay]);
+  }, [running, exitFullscreen, clearSlideDelay, clearAdvanceTimer]);
 
   useEffect(() => {
     return () => {
       exitFullscreen();
       clearSlideDelay();
+      clearAdvanceTimer();
     };
-  }, [exitFullscreen, clearSlideDelay]);
+  }, [exitFullscreen, clearSlideDelay, clearAdvanceTimer]);
 
   useEffect(() => {
-    if (!shouldAutoAdvance || slides.length === 0) return;
+    if (!shouldAutoAdvance || slides.length === 0) {
+      clearAdvanceTimer();
+      return;
+    }
+    if (!current) return;
 
-    const duration = PROTOCOL_DURATIONS[key] ?? 400; // default to 400ms if not found
+    clearAdvanceTimer();
 
-    const timer = window.setInterval(() => {
+    if (idx === 0) {
+      console.log("[RunTest] active protocol", key);
+      console.log("[RunTest] slide order", slides);
+    }
+
+    const duration = getSlideDurationMs(current);
+    console.log("[RunTest] slide dwell (ms)", duration, "slide", current);
+
+    if (idx >= slides.length - 1) return;
+
+    advanceTimer.current = window.setTimeout(() => {
       setIdx((i) => {
-        const nextIdx = i + 1;
-        if (nextIdx >= slides.length) {
-          // Protocol finished
-          // Check if there are more protocols or if we should stop
-          // For now, just stop if it's the last slide of the current protocol
-          // But the requirement says "runs through all protocols".
-          // The current implementation seems to select one protocol at a time via dropdown.
-          // If we need to run ALL protocols automatically, we need a sequence.
-          // However, the prompt says "runs through all protocols and stops recording automatically after completion".
-          // This implies we should iterate through keys of manifest.
-
-          // Let's implement a simple sequence logic here or in a separate effect.
-          // But wait, `next()` just increments index.
-
-          return i; // Stay on last slide, let the effect below handle protocol switching
-        }
-
-        if (running) {
+        const nextIdx = Math.min(i + 1, slides.length - 1);
+        if (running && nextIdx !== i) {
           setMarks((prev) => [...prev, { slide: nextIdx, t: performance.now() - t0.current }]);
         }
         return nextIdx;
       });
     }, duration);
-    return () => window.clearInterval(timer);
-  }, [shouldAutoAdvance, slides.length, key, running]);
+
+    return () => {
+      clearAdvanceTimer();
+    };
+  }, [
+    shouldAutoAdvance,
+    slides.length,
+    current,
+    idx,
+    key,
+    running,
+    slides,
+    getSlideDurationMs,
+    clearAdvanceTimer,
+  ]);
+
+  useEffect(() => {
+    if (!current) return;
+    if (lastLoggedSlideRef.current === current) return;
+    lastLoggedSlideRef.current = current;
+
+    if (!running || !sessionId || key !== "calibration") return;
+
+    const filename = getFilename(current);
+    if (filename === "center.png") return;
+
+    const match = /^(\d+)-(\d+)\.png$/.exec(filename);
+    if (!match) return;
+
+    const entry: CalibrationTarget = {
+      filename,
+      x: Number.parseInt(match[1], 10),
+      y: Number.parseInt(match[2], 10),
+      timestamp_ms: Date.now(),
+    };
+
+    calibrationTargetsRef.current.push(entry);
+    if (!calibrationCreatedAtRef.current) {
+      calibrationCreatedAtRef.current = Date.now();
+    }
+
+    const payload = {
+      session_id: sessionId,
+      created_at_ms: calibrationCreatedAtRef.current,
+      targets: calibrationTargetsRef.current,
+    };
+    void writeSessionJson(`recordings/${sessionId}/calibration_targets.json`, payload);
+  }, [current, running, sessionId, key, getFilename, writeSessionJson]);
 
   // Handle protocol switching / auto-stop
   useEffect(() => {
@@ -291,7 +378,7 @@ export default function RunTest() {
     if (idx >= slides.length - 1) {
       // We are at the last slide.
       // Wait for the duration of the last slide then move to next protocol or stop.
-      const duration = PROTOCOL_DURATIONS[key] ?? 400;
+      const duration = getSlideDurationMs(current);
       const timer = setTimeout(() => {
         if (mode === 'single') {
           // Single mode: stop after this protocol
@@ -313,7 +400,7 @@ export default function RunTest() {
       }, duration);
       return () => clearTimeout(timer);
     }
-  }, [idx, slides.length, shouldAutoAdvance, key, manifest, mode]);
+  }, [idx, slides.length, shouldAutoAdvance, key, manifest, mode, current, getSlideDurationMs]);
 
   // Redirect after session ends
   useEffect(() => {
@@ -340,6 +427,7 @@ export default function RunTest() {
     setBusy(true);
     setError(null);
     clearSlideDelay();
+    clearAdvanceTimer();
     setSlidesReady(false);
 
     // If mode is ALL, ensure we start from the first protocol
@@ -362,6 +450,9 @@ export default function RunTest() {
     }
 
     const sid = newSessionId();
+    calibrationTargetsRef.current = [];
+    calibrationCreatedAtRef.current = Date.now();
+    lastLoggedSlideRef.current = null;
     // const outDir = `recordings/${sid}`; // Unused variable removed
     // Relative to app root, or absolute?
     // IPC `tracking:start` uses `process.env.APP_ROOT` to resolve script, but for `outDir`?
@@ -430,6 +521,7 @@ export default function RunTest() {
     if (!sessionId || !startedAtIso || ended || busy) return;
     setBusy(true);
     clearSlideDelay();
+    clearAdvanceTimer();
     setSlidesReady(false);
 
     const stopRes = await stopTracker().catch(() => ({ ok: false, message: "IPC error" }));
@@ -495,7 +587,11 @@ export default function RunTest() {
     setIdx(0);
     setLastEnded(null);
     clearSlideDelay();
+    clearAdvanceTimer();
     setSlidesReady(false);
+    calibrationTargetsRef.current = [];
+    calibrationCreatedAtRef.current = null;
+    lastLoggedSlideRef.current = null;
   }
 
   function attachPickedPatient() {
@@ -520,6 +616,14 @@ export default function RunTest() {
         : headStatus === "ALIGNING"
           ? "bg-blue-100 text-blue-800 border-blue-300"
           : "bg-red-100 text-red-800 border-red-300";
+
+  const stageClassName = running
+    ? "fixed inset-0 bg-black flex items-center justify-center z-50"
+    : "w-full h-[480px] bg-black flex items-center justify-center";
+
+  const slideImageClassName = running
+    ? "w-screen h-screen object-contain select-none"
+    : "max-h-[460px] max-w-full object-contain select-none";
 
   return (
     <div className="p-6 space-y-4">
@@ -695,15 +799,15 @@ export default function RunTest() {
 
       {/* Stage */}
       <div className="rounded-lg border bg-white overflow-hidden">
-        <div className="px-3 py-2 border-b text-sm text-gray-600">
+        <div className={running ? "hidden" : "px-3 py-2 border-b text-sm text-gray-600"}>
           {manifest[key]?.label ?? "—"} — slide {slides.length ? idx + 1 : "—"}
         </div>
-        <div ref={stageRef} className="w-full h-[480px] bg-black flex items-center justify-center">
+        <div ref={stageRef} className={stageClassName}>
           {current ? (
             <img
               src={current}
               alt="Protocol slide"
-              className="max-h-[460px] max-w-full object-contain select-none"
+              className={slideImageClassName}
               draggable={false}
             />
           ) : (
@@ -724,7 +828,7 @@ export default function RunTest() {
           <span className="text-gray-600">Recorded slide changes:</span> <b>{marks.length}</b>
         </div>
         <div className="text-gray-600">
-          Timing: Sentences 4s, All others 400ms. Use ← / → for manual control.
+          Timing: Calibration center 800ms, target 1500ms. Others use protocol defaults. Use ← / → for manual control.
         </div>
       </div>
 

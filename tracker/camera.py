@@ -61,7 +61,7 @@ def _try_lock_camera_props(cap):
         pass
 
 
-def record_video(camera_index, output_dir="recordings", show_preview=True):
+def record_video(camera_index, output_dir="recordings", show_preview=True, stop_check=None):
     """
     Records video from the webcam to a file.
     
@@ -69,6 +69,7 @@ def record_video(camera_index, output_dir="recordings", show_preview=True):
         camera_index (int): The preferred camera index.
         output_dir (str): Directory where the recording will be saved.
         show_preview (bool): Whether to show a live preview window.
+        stop_check (callable | None): Optional function to stop recording.
         
     Returns:
         tuple: (video_filename as str, fps as float)
@@ -121,6 +122,8 @@ def record_video(camera_index, output_dir="recordings", show_preview=True):
     stop_requested = False
 
     while True:
+        if stop_check and stop_check():
+            stop_requested = True
         ok, frame = cap.read()
         if not ok:
             continue

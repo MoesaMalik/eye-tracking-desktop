@@ -34,6 +34,14 @@ export default function App() {
               Calibrate
             </NavLink>
             <NavLink
+              to="/calibration-results"
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`
+              }
+            >
+              Calibration Results
+            </NavLink>
+            <NavLink
               to="/recorder"
               className={({ isActive }) =>
                 `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`

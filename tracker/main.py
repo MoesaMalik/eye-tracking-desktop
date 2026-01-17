@@ -706,7 +706,12 @@ def main():
     print("=" * 70)
 
     try:
-        video_path, fps = record_video(CAM_INDEX, output_dir=output_dir, show_preview=show_preview)
+        video_path, fps = record_video(
+            CAM_INDEX,
+            output_dir=output_dir,
+            show_preview=show_preview,
+            stop_check=lambda: stop_requested,
+        )
         use_video = video_path
     except Exception as e:
         print(f"\n[WARN] {e}")

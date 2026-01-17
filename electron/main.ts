@@ -78,6 +78,22 @@ function resolvePython(): string {
   return candidates[candidates.length - 1];
 }
 
+function safePathSegment(value: string) {
+  if (!value || value.includes("..") || value.includes("/") || value.includes("\\")) {
+    throw new Error("Invalid path segment");
+  }
+  return value;
+}
+
+function parseSessionTimestamp(name: string) {
+  const match = /_(\d{8})_(\d{6})$/.exec(name);
+  if (!match) return 0;
+  const [yyyy, mm, dd] = [match[1].slice(0, 4), match[1].slice(4, 6), match[1].slice(6, 8)];
+  const [hh, mi, ss] = [match[2].slice(0, 2), match[2].slice(2, 4), match[2].slice(4, 6)];
+  const parsed = new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
 function createWindow() {
   const iconPath = path.join(
     process.env.VITE_PUBLIC!,
@@ -340,6 +356,93 @@ ipcMain.handle("recordings:list-folders", async () => {
   })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 });
 
+ipcMain.handle("recordings:listSessions", async (_e, { limit = 20 }: { limit?: number } = {}) => {
+  const recDir = path.join(process.env.APP_ROOT!, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  const items = fs.readdirSync(recDir);
+  const dirs = items.filter((item) => {
+    const itemPath = path.join(recDir, item);
+    return fs.statSync(itemPath).isDirectory();
+  });
+  const sessions = dirs.map((name) => {
+    const dirPath = path.join(recDir, name);
+    const stat = fs.statSync(dirPath);
+    const mtimeMs = stat.mtimeMs;
+    const sortKey = mtimeMs || parseSessionTimestamp(name);
+    const reportPath = path.join(dirPath, "calibration_report.json");
+    const pairsPath = path.join(dirPath, "calibration_pairs.json");
+    const hasCalibration = fs.existsSync(reportPath) && fs.existsSync(pairsPath);
+    return { sessionId: name, mtimeMs, sortKey, hasCalibration };
+  });
+  return sessions
+    .sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0))
+    .slice(0, limit)
+    .map(({ sortKey: _sortKey, ...rest }) => rest);
+});
+
+ipcMain.handle(
+  "recordings:readJson",
+  async (_e, { sessionId, filename }: { sessionId: string; filename: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const safeFile = safePathSegment(filename);
+      const filePath = path.join(recDir, safeSession, safeFile);
+      const resolved = path.resolve(filePath);
+      const resolvedRoot = path.resolve(recDir);
+      if (!resolved.startsWith(resolvedRoot + path.sep)) {
+        return { ok: false, error: "Invalid path" };
+      }
+      if (!fs.existsSync(resolved)) {
+        return { ok: false, error: "File not found" };
+      }
+      const raw = fs.readFileSync(resolved, "utf-8");
+      const data = JSON.parse(raw);
+      return { ok: true, data };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+);
+
+ipcMain.handle("calibration:run", async (_e, { sessionId }: { sessionId: string }) => {
+  try {
+    const recDir = path.join(process.env.APP_ROOT!, "recordings");
+    const safeSession = safePathSegment(sessionId);
+    const sessionPath = path.join(recDir, safeSession);
+    if (!fs.existsSync(sessionPath)) {
+      return { ok: false, error: "Session folder not found" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "calibration_fit.py");
+
+    return await new Promise((resolve) => {
+      const proc = spawn(python, [scriptPath, sessionPath], {
+        cwd: process.env.APP_ROOT!,
+      });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (buf) => {
+        stdout += buf.toString();
+      });
+      proc.stderr.on("data", (buf) => {
+        stderr += buf.toString();
+      });
+      proc.on("close", (code) => {
+        resolve({
+          ok: code === 0,
+          code,
+          stdout,
+          stderr,
+        });
+      });
+    });
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+});
+
 ipcMain.handle("session:load-data", async (_e, folderPath: string) => {
   if (!fs.existsSync(folderPath)) return { ok: false, error: "Folder not found" };
 
@@ -367,6 +470,19 @@ ipcMain.handle("session:load-data", async (_e, folderPath: string) => {
     videoPath,
     trackingData
   };
+});
+
+ipcMain.handle("session:write-json", async (_e, { filePath, data }: { filePath: string; data: unknown }) => {
+  try {
+    const resolvedPath = path.isAbsolute(filePath)
+      ? filePath
+      : path.join(process.env.APP_ROOT!, filePath);
+    fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+    fs.writeFileSync(resolvedPath, JSON.stringify(data, null, 2));
+    return { ok: true, path: resolvedPath };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 });
 
 /* -------------------- App lifecycle -------------------- */
