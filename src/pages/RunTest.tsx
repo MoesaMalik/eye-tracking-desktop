@@ -75,6 +75,7 @@ export default function RunTest() {
 
   const patientsMap = usePatientStore((s) => s.patients);
   const addSessionSummary = usePatientStore((s) => s.addSessionSummary);
+  const sessionsByPatient = usePatientStore((s) => s.sessionsByPatient);
 
   const patients = useMemo<Patient[]>(
     () => Object.values(patientsMap).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
@@ -82,6 +83,15 @@ export default function RunTest() {
   );
   const patient: Patient | undefined = patientsMap[patientIdParam];
   const [pickerId, setPickerId] = useState<string>("");
+  const patientSessions = useMemo<SessionSummary[]>(
+    () =>
+      (patientIdParam && sessionsByPatient[patientIdParam]
+        ? [...sessionsByPatient[patientIdParam]]
+        : []
+      ).sort((a, b) => a.startedAt.localeCompare(b.startedAt)),
+    [patientIdParam, sessionsByPatient]
+  );
+  const baselineSession = patientSessions[0];
 
   // --- Protocols ---
   const [manifest, setManifest] = useState<ProtocolManifest>({});
@@ -765,6 +775,10 @@ export default function RunTest() {
               <b>{patient.code}</b>
               {patient.initials ? <span className="text-gray-500 ml-2">({patient.initials})</span> : null}
             </div>
+            <div className="text-xs text-gray-500">
+              Baseline: {baselineSession ? new Date(baselineSession.startedAt).toLocaleString() : "not recorded"}
+              {patientSessions.length > 1 ? ` - Reruns: ${patientSessions.length - 1}` : ""}
+            </div>
             <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">
               Change
             </Link>
@@ -838,7 +852,7 @@ export default function RunTest() {
                   : ""
             }
           >
-            Start Session
+            {patient ? (baselineSession ? "Rerun Test" : "Start Baseline") : "Start Session"}
           </button>
         ) : running ? (
           <button

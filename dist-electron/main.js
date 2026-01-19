@@ -71,6 +71,10 @@ function parseSessionTimestamp(name) {
   const parsed = /* @__PURE__ */ new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`);
   return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
 }
+function parseJsonWithNaN(raw) {
+  const sanitized = raw.replace(/\bNaN\b/g, "null").replace(/\bInfinity\b/g, "null").replace(/\b-Infinity\b/g, "null");
+  return JSON.parse(sanitized);
+}
 function findLatestTrackingDataFile(rootDir) {
   if (!fs.existsSync(rootDir)) return null;
   let latestPath = null;
@@ -432,7 +436,7 @@ ipcMain.handle(
         return { ok: false, error: "Invalid path" };
       }
       const raw = fs.readFileSync(resolved, "utf-8");
-      const data = JSON.parse(raw);
+      const data = parseJsonWithNaN(raw);
       return { ok: true, data };
     } catch (e) {
       return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
@@ -454,7 +458,7 @@ ipcMain.handle(
         return { ok: false, error: "Tracking data not found" };
       }
       const raw = fs.readFileSync(trackingPath, "utf-8");
-      const data = JSON.parse(raw);
+      const data = parseJsonWithNaN(raw);
       return { ok: true, data, filename: path.basename(trackingPath) };
     } catch (e) {
       return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
@@ -507,7 +511,7 @@ ipcMain.handle("session:load-data", async (_e, folderPath) => {
   let trackingData = null;
   if (trackingPath) {
     try {
-      trackingData = JSON.parse(fs.readFileSync(trackingPath, "utf-8"));
+      trackingData = parseJsonWithNaN(fs.readFileSync(trackingPath, "utf-8"));
     } catch (e) {
       console.error("Failed to parse tracking data", e);
     }

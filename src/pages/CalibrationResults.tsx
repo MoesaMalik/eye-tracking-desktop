@@ -28,6 +28,10 @@ type CalibrationPair = {
     y: number;
     timestamp_ms: number;
   };
+  gaze_norm_avg?: {
+    x: number | null;
+    y: number | null;
+  };
   eye_avg?: {
     x: number | null;
     y: number | null;
@@ -79,6 +83,7 @@ type CalibrationReportPayload = {
 };
 
 type CalibrationModelPayload = {
+  input?: string;
   coeffs?: {
     sx?: number[];
     sy?: number[];
@@ -101,9 +106,14 @@ function formatNumber(value: number | null | undefined, digits = 2) {
   return value.toFixed(digits);
 }
 
-const getGazePoint = (p: CalibrationPair) => {
+const getPixelGazePoint = (p: CalibrationPair) => {
   const eye = p.eye_avg ?? p.gaze_avg;
   return { x: eye?.x ?? null, y: eye?.y ?? null };
+};
+
+const getNormGazePoint = (p: CalibrationPair) => {
+  const norm = p.gaze_norm_avg;
+  return { x: norm?.x ?? null, y: norm?.y ?? null };
 };
 
 const toTrackingFrames = (payload: TrackingPayload | TrackingFrame[] | null) => {
@@ -213,16 +223,20 @@ export default function CalibrationResults() {
   }, [selectedSession, reloadToken]);
 
   const pairs = pairsPayload?.pairs ?? [];
+  const modelInput = model?.input ?? "gaze_avg_xy";
+  const usesNormInput = modelInput === "gaze_norm_xy";
+  const getFeaturePoint = (p: CalibrationPair) =>
+    (usesNormInput ? getNormGazePoint(p) : getPixelGazePoint(p));
   const validPairs = useMemo(
     () =>
       pairs.filter(
         (p) => {
           if (!p.valid) return false;
-          const gaze = getGazePoint(p);
+          const gaze = getFeaturePoint(p);
           return gaze.x !== null && gaze.y !== null;
         }
       ),
-    [pairs]
+    [pairs, usesNormInput]
   );
 
   const hasModel =
@@ -248,7 +262,7 @@ export default function CalibrationResults() {
     }
     if (!hasModel) return [];
     return validPairs.map((p) => {
-      const gaze = getGazePoint(p);
+      const gaze = getFeaturePoint(p);
       const pred = predict(gaze.x!, gaze.y!);
       const dx = pred.x - p.target.x;
       const dy = pred.y - p.target.y;
@@ -273,18 +287,27 @@ export default function CalibrationResults() {
     name: p.target.filename,
   }));
 
-  const scatterMeasured = validPairs.map((p) => {
-    const gaze = getGazePoint(p);
-    return { x: gaze.x!, y: gaze.y!, name: p.target.filename };
-  });
+  const scatterMeasured = hasModel || !usesNormInput
+    ? validPairs.map((p) => {
+      const gaze = getFeaturePoint(p);
+      if (gaze.x === null || gaze.y === null) return null;
+      if (usesNormInput && hasModel) {
+        const pred = predict(gaze.x, gaze.y);
+        return { x: pred.x, y: pred.y, name: p.target.filename };
+      }
+      return { x: gaze.x, y: gaze.y, name: p.target.filename };
+    }).filter((p): p is { x: number; y: number; name: string } => p !== null)
+    : [];
 
   const scatterPredicted = hasModel
     ? validPairs.map((p) => {
-      const gaze = getGazePoint(p);
+      const gaze = getFeaturePoint(p);
       const pred = predict(gaze.x!, gaze.y!);
       return { x: pred.x, y: pred.y, name: p.target.filename };
     })
     : [];
+
+  const measuredLabel = usesNormInput ? "Measured gaze (projected)" : "Measured gaze";
 
   const trackingSeries = useMemo(() => {
     const frames = toTrackingFrames(tracking);
@@ -335,7 +358,7 @@ export default function CalibrationResults() {
   const maxGazeY = Math.max(0, ...trackingSeries.map((p) => p.gazeY ?? 0));
 
   const tableRows = pairs.map((p) => {
-    const gaze = getGazePoint(p);
+    const gaze = getFeaturePoint(p);
     const pred = hasModel && p.valid && gaze.x !== null && gaze.y !== null
       ? predict(gaze.x, gaze.y)
       : null;
@@ -530,7 +553,9 @@ export default function CalibrationResults() {
                         <Tooltip cursor={{ strokeDasharray: "3 3" }} />
                         <Legend />
                         <Scatter name="Target" data={scatterTargets} fill="#111827" />
-                        <Scatter name="Measured gaze" data={scatterMeasured} fill="#f97316" />
+                        {scatterMeasured.length > 0 && (
+                          <Scatter name={measuredLabel} data={scatterMeasured} fill="#f97316" />
+                        )}
                         {hasModel && (
                           <Scatter name="Predicted" data={scatterPredicted} fill="#2563eb" />
                         )}
@@ -624,7 +649,9 @@ export default function CalibrationResults() {
                       <tr>
                         <th className="text-left px-3 py-2">Filename</th>
                         <th className="text-left px-3 py-2">Target (x, y)</th>
-                        <th className="text-left px-3 py-2">Avg gaze (gx, gy)</th>
+                        <th className="text-left px-3 py-2">
+                          {usesNormInput ? "Avg gaze (nx, ny)" : "Avg gaze (gx, gy)"}
+                        </th>
                         <th className="text-left px-3 py-2">Predicted (x, y)</th>
                         <th className="text-left px-3 py-2">Error (px)</th>
                         <th className="text-left px-3 py-2">Valid frames</th>

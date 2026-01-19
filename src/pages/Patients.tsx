@@ -7,6 +7,7 @@ export default function Patients() {
   const addPatient = usePatientStore((s) => s.addPatient);
   const deletePatient = usePatientStore((s) => s.deletePatient);
   const patientsMap = usePatientStore((s) => s.patients); // raw map
+  const sessionsByPatient = usePatientStore((s) => s.sessionsByPatient);
 
   // Build a stable array only when map changes
   const patients = useMemo<Patient[]>(
@@ -81,7 +82,7 @@ export default function Patients() {
             />
           </div>
           <button className="px-3 py-2 rounded bg-gray-900 text-white" onClick={createPatient}>
-            Add & Start Session
+            Add & Start Baseline
           </button>
         </div>
         <div className="text-xs text-gray-500">
@@ -96,37 +97,57 @@ export default function Patients() {
           {patients.length === 0 && (
             <div className="p-4 text-sm text-gray-500">No patients yet.</div>
           )}
-          {patients.map((p: Patient) => (
-            <div key={p.id} className="p-3 flex items-center justify-between gap-3">
-              <div className="space-y-0.5">
-                <div className="font-medium">
-                  {p.code}{" "}
-                  {p.initials ? <span className="text-gray-500 ml-2">({p.initials})</span> : null}
+          {patients.map((p: Patient) => {
+            const sessions = (sessionsByPatient[p.id] ?? []).slice().sort((a, b) =>
+              a.startedAt.localeCompare(b.startedAt)
+            );
+            const baseline = sessions[0];
+            const rerunCount = Math.max(0, sessions.length - 1);
+            return (
+              <div key={p.id} className="p-3 flex items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="font-medium">
+                    {p.code}{" "}
+                    {p.initials ? <span className="text-gray-500 ml-2">({p.initials})</span> : null}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    Created {new Date(p.createdAt).toLocaleString()}
+                    {p.birthYear ? ` • BY ${p.birthYear}` : ""}
+                  </div>
+                  {p.notes ? <div className="text-xs text-gray-500">Notes: {p.notes}</div> : null}
+                  <div className="text-xs text-gray-500">
+                    Baseline: {baseline ? new Date(baseline.startedAt).toLocaleString() : "not recorded"}
+                    {rerunCount > 0 ? ` - Reruns: ${rerunCount}` : ""}
+                  </div>
                 </div>
-                <div className="text-xs text-gray-500">
-                  Created {new Date(p.createdAt).toLocaleString()}
-                  {p.birthYear ? ` • BY ${p.birthYear}` : ""}
+                <div className="flex items-center gap-2">
+                  <Link
+                    to={`/run?patient=${p.id}`}
+                    className="px-3 py-1.5 border rounded bg-white text-sm"
+                    title="Start a test session"
+                  >
+                    {sessionsByPatient[p.id]?.length ? "Rerun Test" : "Start Baseline"}
+                  </Link>
+                  {sessionsByPatient[p.id]?.length && sessionsByPatient[p.id].length > 1 ? (
+                    <Link
+                      to={`/results?patient=${p.id}`}
+                      className="px-3 py-1.5 border rounded bg-white text-sm"
+                      title="Compare baseline vs rerun"
+                    >
+                      Compare
+                    </Link>
+                  ) : null}
+                  <button
+                    className="px-3 py-1.5 border rounded bg-white text-sm"
+                    onClick={() => deletePatient(p.id)}
+                    title="Delete patient"
+                  >
+                    Delete
+                  </button>
                 </div>
-                {p.notes ? <div className="text-xs text-gray-500">Notes: {p.notes}</div> : null}
               </div>
-              <div className="flex items-center gap-2">
-                <Link
-                  to={`/run?patient=${p.id}`}
-                  className="px-3 py-1.5 border rounded bg-white text-sm"
-                  title="Start a test session"
-                >
-                  Start Session
-                </Link>
-                <button
-                  className="px-3 py-1.5 border rounded bg-white text-sm"
-                  onClick={() => deletePatient(p.id)}
-                  title="Delete patient"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

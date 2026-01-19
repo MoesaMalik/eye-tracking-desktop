@@ -14,6 +14,9 @@ import numpy as np
 WINDOW_START_OFFSET_MS = 500
 WINDOW_END_OFFSET_MS = 1250
 MIN_FRAMES = 5
+NORM_EPS = 1e-6
+NORM_CLAMP_MIN = -0.5
+NORM_CLAMP_MAX = 1.5
 
 
 def load_json(path: Path):
@@ -105,6 +108,59 @@ def stddev(vals):
     return statistics.pstdev(vals)
 
 
+def clamp(val, lo, hi):
+    return max(lo, min(hi, val))
+
+
+def is_valid_number(val):
+    return isinstance(val, (int, float)) and not math.isnan(val)
+
+
+def compute_norm(center_x, center_y, lr_left_x, lr_right_x, tb_top_y, tb_bottom_y):
+    if not all(is_valid_number(v) for v in [center_x, center_y, lr_left_x, lr_right_x, tb_top_y, tb_bottom_y]):
+        return None
+    width = lr_right_x - lr_left_x
+    height = tb_bottom_y - tb_top_y
+    if width <= NORM_EPS or height <= NORM_EPS:
+        return None
+    nx = (center_x - lr_left_x) / width
+    ny = (center_y - tb_top_y) / height
+    return (
+        clamp(nx, NORM_CLAMP_MIN, NORM_CLAMP_MAX),
+        clamp(ny, NORM_CLAMP_MIN, NORM_CLAMP_MAX),
+    )
+
+
+def get_eye_box(frame, side):
+    if side == "left":
+        keys = ("left_eye_left_x", "left_eye_right_x", "left_eye_top_y", "left_eye_bottom_y")
+    else:
+        keys = ("right_eye_left_x", "right_eye_right_x", "right_eye_top_y", "right_eye_bottom_y")
+
+    vals = [frame.get(k) for k in keys]
+    if all(is_valid_number(v) for v in vals):
+        return (*vals, "eye")
+    return (None, None, None, None, "missing")
+
+
+def get_norm_center(frame, side):
+    mp_x = frame.get(f"{side}_mp_x")
+    mp_y = frame.get(f"{side}_mp_y")
+    if is_valid_number(mp_x) and is_valid_number(mp_y):
+        return mp_x, mp_y, "mp"
+    return None, None, "missing"
+
+
+def fmt_num(val, digits=4):
+    if val is None:
+        return "None"
+    if isinstance(val, float):
+        if math.isnan(val):
+            return "nan"
+        return f"{val:.{digits}f}"
+    return str(val)
+
+
 def build_pairs(
     frames, 
     left_x_key, 
@@ -113,24 +169,32 @@ def build_pairs(
     right_y_key, 
     targets, 
     timebase_mode, 
-    ts_key
+    ts_key,
+    debug=False
 ):
     """
-    Build calibration pairs using separate left/right eye centers.
+    Build calibration pairs using normalized gaze features.
     Handles 'epoch_ms' and 'relative_sec' logic for windowing.
     """
     pairs = []
+    norm_min_x = None
+    norm_max_x = None
+    norm_min_y = None
+    norm_max_y = None
     
     # Sort targets by timestamp_ms descending to find t0 (start time)
     # User's logic: sort targets by timestamp_ms ascending
     sorted_targets = sorted(targets, key=lambda x: x["timestamp_ms"])
     if not sorted_targets:
-        return []
+        empty_stats = {"min_x": None, "max_x": None, "min_y": None, "max_y": None}
+        return [], empty_stats, [] if debug else None
         
     t0_ms = sorted_targets[0]["timestamp_ms"]
     
     print(f"[calibration] Timebase Mode: {timebase_mode}")
     
+    debug_targets = [] if debug else None
+
     for t in sorted_targets:
         t_ms = t["timestamp_ms"]
         
@@ -160,6 +224,19 @@ def build_pairs(
         left_y_samples = []
         right_x_samples = []
         right_y_samples = []
+        left_norm_x_samples = []
+        left_norm_y_samples = []
+        right_norm_x_samples = []
+        right_norm_y_samples = []
+        gaze_norm_x_samples = []
+        gaze_norm_y_samples = []
+
+        target_debug = None
+        if debug:
+            target_debug = {
+                "filename": t["filename"],
+                "samples": [],
+            }
         
         frames_in_window_count = 0
         valid_frames_used = 0
@@ -184,8 +261,35 @@ def build_pairs(
             rx = f.get(right_x_key)
             ry = f.get(right_y_key)
 
-            left_valid = lx is not None and ly is not None
-            right_valid = rx is not None and ry is not None
+            left_box_left, left_box_right, left_box_top, left_box_bottom, left_box_src = get_eye_box(
+                f, "left"
+            )
+            right_box_left, right_box_right, right_box_top, right_box_bottom, right_box_src = get_eye_box(
+                f, "right"
+            )
+
+            left_cx, left_cy, left_center_src = get_norm_center(f, "left")
+            right_cx, right_cy, right_center_src = get_norm_center(f, "right")
+
+            left_norm = compute_norm(
+                left_cx,
+                left_cy,
+                left_box_left,
+                left_box_right,
+                left_box_top,
+                left_box_bottom,
+            )
+            right_norm = compute_norm(
+                right_cx,
+                right_cy,
+                right_box_left,
+                right_box_right,
+                right_box_top,
+                right_box_bottom,
+            )
+
+            left_valid = left_norm is not None
+            right_valid = right_norm is not None
 
             # Require at least one valid eye sample
             if not left_valid and not right_valid:
@@ -194,12 +298,100 @@ def build_pairs(
             valid_frames_used += 1
 
             if left_valid:
-                left_x_samples.append(float(lx))
-                left_y_samples.append(float(ly))
+                left_x_samples.append(float(left_cx))
+                left_y_samples.append(float(left_cy))
+                left_norm_x_samples.append(left_norm[0])
+                left_norm_y_samples.append(left_norm[1])
 
             if right_valid:
-                right_x_samples.append(float(rx))
-                right_y_samples.append(float(ry))
+                right_x_samples.append(float(right_cx))
+                right_y_samples.append(float(right_cy))
+                right_norm_x_samples.append(right_norm[0])
+                right_norm_y_samples.append(right_norm[1])
+
+            if left_valid and right_valid:
+                gaze_norm_x = (left_norm[0] + right_norm[0]) / 2.0
+                gaze_norm_y = (left_norm[1] + right_norm[1]) / 2.0
+            elif left_valid:
+                gaze_norm_x = left_norm[0]
+                gaze_norm_y = left_norm[1]
+            else:
+                gaze_norm_x = right_norm[0]
+                gaze_norm_y = right_norm[1]
+
+            gaze_norm_x_samples.append(gaze_norm_x)
+            gaze_norm_y_samples.append(gaze_norm_y)
+            norm_min_x = gaze_norm_x if norm_min_x is None else min(norm_min_x, gaze_norm_x)
+            norm_max_x = gaze_norm_x if norm_max_x is None else max(norm_max_x, gaze_norm_x)
+            norm_min_y = gaze_norm_y if norm_min_y is None else min(norm_min_y, gaze_norm_y)
+            norm_max_y = gaze_norm_y if norm_max_y is None else max(norm_max_y, gaze_norm_y)
+
+            if debug and target_debug is not None:
+                left_mid_x = (
+                    (left_box_left + left_box_right) / 2.0
+                    if is_valid_number(left_box_left) and is_valid_number(left_box_right)
+                    else None
+                )
+                left_mid_y = (
+                    (left_box_top + left_box_bottom) / 2.0
+                    if is_valid_number(left_box_top) and is_valid_number(left_box_bottom)
+                    else None
+                )
+                right_mid_x = (
+                    (right_box_left + right_box_right) / 2.0
+                    if is_valid_number(right_box_left) and is_valid_number(right_box_right)
+                    else None
+                )
+                right_mid_y = (
+                    (right_box_top + right_box_bottom) / 2.0
+                    if is_valid_number(right_box_top) and is_valid_number(right_box_bottom)
+                    else None
+                )
+                target_debug["samples"].append(
+                    {
+                        "ts": f.get(ts_key),
+                        "left_center_x": lx,
+                        "left_center_y": ly,
+                        "left_mp_x": f.get("left_mp_x"),
+                        "left_mp_y": f.get("left_mp_y"),
+                        "left_box_left_x": left_box_left,
+                        "left_box_right_x": left_box_right,
+                        "left_box_top_y": left_box_top,
+                        "left_box_bottom_y": left_box_bottom,
+                        "left_box_src": left_box_src,
+                        "left_center_src": left_center_src,
+                        "left_nx": left_norm[0] if left_norm else None,
+                        "left_ny": left_norm[1] if left_norm else None,
+                        "left_mid_x": left_mid_x,
+                        "left_mid_y": left_mid_y,
+                        "left_delta_x": (left_cx - left_mid_x) if left_cx is not None and left_mid_x is not None else None,
+                        "left_delta_y": (left_cy - left_mid_y) if left_cy is not None and left_mid_y is not None else None,
+                        "left_lr_left_x": f.get("left_lr_left_x"),
+                        "left_lr_right_x": f.get("left_lr_right_x"),
+                        "left_tb_top_y": f.get("left_tb_top_y"),
+                        "left_tb_bottom_y": f.get("left_tb_bottom_y"),
+                        "right_center_x": rx,
+                        "right_center_y": ry,
+                        "right_mp_x": f.get("right_mp_x"),
+                        "right_mp_y": f.get("right_mp_y"),
+                        "right_box_left_x": right_box_left,
+                        "right_box_right_x": right_box_right,
+                        "right_box_top_y": right_box_top,
+                        "right_box_bottom_y": right_box_bottom,
+                        "right_box_src": right_box_src,
+                        "right_center_src": right_center_src,
+                        "right_nx": right_norm[0] if right_norm else None,
+                        "right_ny": right_norm[1] if right_norm else None,
+                        "right_mid_x": right_mid_x,
+                        "right_mid_y": right_mid_y,
+                        "right_delta_x": (right_cx - right_mid_x) if right_cx is not None and right_mid_x is not None else None,
+                        "right_delta_y": (right_cy - right_mid_y) if right_cy is not None and right_mid_y is not None else None,
+                        "right_lr_left_x": f.get("right_lr_left_x"),
+                        "right_lr_right_x": f.get("right_lr_right_x"),
+                        "right_tb_top_y": f.get("right_tb_top_y"),
+                        "right_tb_bottom_y": f.get("right_tb_bottom_y"),
+                    }
+                )
         
         # Compute statistics
         left_count = len(left_x_samples)
@@ -210,13 +402,15 @@ def build_pairs(
         left_avg_y = median(left_y_samples) if left_y_samples else None
         right_avg_x = median(right_x_samples) if right_x_samples else None
         right_avg_y = median(right_y_samples) if right_y_samples else None
+        gaze_norm_avg_x = median(gaze_norm_x_samples) if gaze_norm_x_samples else None
+        gaze_norm_avg_y = median(gaze_norm_y_samples) if gaze_norm_y_samples else None
         
         left_std_x = stddev(left_x_samples) if left_x_samples else None
         left_std_y = stddev(left_y_samples) if left_y_samples else None
         right_std_x = stddev(right_x_samples) if right_x_samples else None
         right_std_y = stddev(right_y_samples) if right_y_samples else None
         
-        # Compute binocular gaze (for calibration fitting only)
+        # Compute binocular gaze (pixel space, for debugging only)
         eye_avg_x = None
         eye_avg_y = None
         if left_avg_x is not None and right_avg_x is not None:
@@ -230,7 +424,7 @@ def build_pairs(
             eye_avg_y = right_avg_y
         
         # Validity check
-        valid = n_frames >= MIN_FRAMES and eye_avg_x is not None and eye_avg_y is not None
+        valid = n_frames >= MIN_FRAMES
         invalid_reason = None
         if not valid:
             invalid_reason = (
@@ -264,22 +458,44 @@ def build_pairs(
             "right_avg": {"x": right_avg_x, "y": right_avg_y},
             "left_std": {"x": left_std_x, "y": left_std_y},
             "right_std": {"x": right_std_x, "y": right_std_y},
+            "left_norm_count": len(left_norm_x_samples),
+            "right_norm_count": len(right_norm_x_samples),
+            "gaze_norm_avg": {"x": gaze_norm_avg_x, "y": gaze_norm_avg_y},
             "eye_avg": {"x": eye_avg_x, "y": eye_avg_y},
-            "gaze_avg": {"x": eye_avg_x, "y": eye_avg_y},  # For model fitting
+            "gaze_avg": {"x": eye_avg_x, "y": eye_avg_y},  # Debug only (pixel space)
             "valid": valid,
             "invalid_reason": invalid_reason,
         }
         pairs.append(entry)
+        if debug and target_debug is not None:
+            target_debug["gaze_norm_avg"] = {"x": gaze_norm_avg_x, "y": gaze_norm_avg_y}
+            target_debug["valid_frames_used"] = valid_frames_used
+            debug_targets.append(target_debug)
     
-    return pairs
+    norm_stats = {
+        "min_x": norm_min_x,
+        "max_x": norm_max_x,
+        "min_y": norm_min_y,
+        "max_y": norm_max_y,
+    }
+    return pairs, norm_stats, debug_targets
 
 
 def fit_affine(pairs):
-    valid = [p for p in pairs if p.get("valid") and p["gaze_avg"]["x"] is not None]
+    valid = [
+        p
+        for p in pairs
+        if p.get("valid")
+        and p.get("gaze_norm_avg", {}).get("x") is not None
+        and p.get("gaze_norm_avg", {}).get("y") is not None
+    ]
     if len(valid) < 3:
         raise ValueError("Not enough valid pairs to fit affine model (need >= 3).")
 
-    X = np.array([[p["gaze_avg"]["x"], p["gaze_avg"]["y"], 1.0] for p in valid], dtype=float)
+    X = np.array(
+        [[p["gaze_norm_avg"]["x"], p["gaze_norm_avg"]["y"], 1.0] for p in valid],
+        dtype=float,
+    )
     sx = np.array([p["target"]["x"] for p in valid], dtype=float)
     sy = np.array([p["target"]["y"] for p in valid], dtype=float)
 
@@ -316,6 +532,8 @@ def build_report(pairs, coeffs_x, coeffs_y):
             "left_avg_y": p["left_avg"]["y"],
             "right_avg_x": p["right_avg"]["x"],
             "right_avg_y": p["right_avg"]["y"],
+            "gaze_norm_avg_x": p.get("gaze_norm_avg", {}).get("x"),
+            "gaze_norm_avg_y": p.get("gaze_norm_avg", {}).get("y"),
             "eye_avg_x": p.get("eye_avg", {}).get("x"),
             "eye_avg_y": p.get("eye_avg", {}).get("y"),
             "left_std_x": p["left_std"]["x"],
@@ -330,8 +548,8 @@ def build_report(pairs, coeffs_x, coeffs_y):
             per_target.append(base_entry)
             continue
         
-        # Compute error using eye_avg (fallback to gaze_avg for legacy)
-        gaze = p.get("eye_avg") or p.get("gaze_avg") or {}
+        # Compute error using gaze_norm_avg (fallback to gaze_avg for legacy)
+        gaze = p.get("gaze_norm_avg") or p.get("gaze_avg") or {}
         gx = gaze.get("x")
         gy = gaze.get("y")
         
@@ -403,16 +621,91 @@ def main():
     if ts_mode == "unknown":
         raise ValueError("Could not detect timebase (checked 'timestamp_ms' and 'timestamp_sec').")
 
+    required_norm_keys = [
+        "left_mp_x",
+        "left_mp_y",
+        "right_mp_x",
+        "right_mp_y",
+        "left_eye_left_x",
+        "left_eye_right_x",
+        "left_eye_top_y",
+        "left_eye_bottom_y",
+        "right_eye_left_x",
+        "right_eye_right_x",
+        "right_eye_top_y",
+        "right_eye_bottom_y",
+    ]
+    missing_norm = [k for k in required_norm_keys if k not in frames[0]]
+    if missing_norm:
+        raise ValueError(
+            "Tracking data missing required eye-box/iris fields for calibration "
+            "(re-run tracker to regenerate tracking data with left_eye_*/right_eye_* fields). "
+            "Missing: " + ", ".join(missing_norm)
+        )
+
     left_x_key, left_y_key, right_x_key, right_y_key = infer_eye_center_fields(frames)
     print(f"[calibration] using fields: L=({left_x_key},{left_y_key}) R=({right_x_key},{right_y_key})")
     print(f"[calibration] using timestamp mode: {ts_mode} (key={ts_key})")
 
-    pairs = build_pairs(frames, left_x_key, left_y_key, right_x_key, right_y_key, targets, ts_mode, ts_key)
+    pairs, norm_stats, debug_targets = build_pairs(
+        frames, left_x_key, left_y_key, right_x_key, right_y_key, targets, ts_mode, ts_key, debug=True
+    )
 
     valid_counts = [p["n_frames"] for p in pairs if p["n_frames"] is not None]
     print(f"[calibration] targets={len(pairs)} valid={len([p for p in pairs if p['valid']])} ")
     if valid_counts:
         print(f"[calibration] frames/window min={min(valid_counts)} max={max(valid_counts)}")
+    if norm_stats.get("min_x") is not None:
+        print(
+            f"[calibration] gaze_norm range nx=[{norm_stats['min_x']:.3f},{norm_stats['max_x']:.3f}] "
+            f"ny=[{norm_stats['min_y']:.3f},{norm_stats['max_y']:.3f}]"
+        )
+        range_x = norm_stats["max_x"] - norm_stats["min_x"]
+        range_y = norm_stats["max_y"] - norm_stats["min_y"]
+        if range_x < 0.10 or range_y < 0.10:
+            print(
+                f"[calibration][error] gaze_norm collapsed: "
+                f"nx_range={range_x:.4f} ny_range={range_y:.4f}"
+            )
+            for p in pairs:
+                gaze_norm = p.get("gaze_norm_avg", {})
+                print(
+                    "[calibration][debug] target "
+                    f"{p['target']['filename']} gaze_norm_avg=({fmt_num(gaze_norm.get('x'))},"
+                    f"{fmt_num(gaze_norm.get('y'))}) valid_frames={p.get('valid_frames_used')}"
+                )
+            if debug_targets:
+                for tgt in debug_targets:
+                    print(f"[calibration][debug] target {tgt['filename']} samples={len(tgt['samples'])}")
+                    for s in tgt["samples"]:
+                        print(
+                            "[calibration][debug] "
+                            f"{tgt['filename']} "
+                            f"ts={fmt_num(s.get('ts'))} "
+                            f"Lx={fmt_num(s.get('left_center_x'))} "
+                            f"LlrL={fmt_num(s.get('left_lr_left_x'))} "
+                            f"LlrR={fmt_num(s.get('left_lr_right_x'))} "
+                            f"Lnx={fmt_num(s.get('left_nx'))} "
+                            f"Ly={fmt_num(s.get('left_center_y'))} "
+                            f"LtbT={fmt_num(s.get('left_tb_top_y'))} "
+                            f"LtbB={fmt_num(s.get('left_tb_bottom_y'))} "
+                            f"Lny={fmt_num(s.get('left_ny'))} "
+                            f"Rx={fmt_num(s.get('right_center_x'))} "
+                            f"RlrL={fmt_num(s.get('right_lr_left_x'))} "
+                            f"RlrR={fmt_num(s.get('right_lr_right_x'))} "
+                            f"Rnx={fmt_num(s.get('right_nx'))} "
+                            f"Ry={fmt_num(s.get('right_center_y'))} "
+                            f"RtbT={fmt_num(s.get('right_tb_top_y'))} "
+                            f"RtbB={fmt_num(s.get('right_tb_bottom_y'))} "
+                            f"Rny={fmt_num(s.get('right_ny'))} "
+                            f"Lsrc={s.get('left_box_src')} "
+                            f"Rsrc={s.get('right_box_src')} "
+                            f"LmidDx={fmt_num(s.get('left_delta_x'))} "
+                            f"RmidDx={fmt_num(s.get('right_delta_x'))}"
+                        )
+            raise ValueError(
+                f"Collapsed gaze_norm features: nx_range={range_x:.4f} ny_range={range_y:.4f}"
+            )
 
     # Write outputs to actual_session_dir (where recording.mp4 is)
     pairs_path = actual_session_dir / "calibration_pairs.json"
@@ -439,6 +732,8 @@ def main():
                 "target_filename",
                 "target_x",
                 "target_y",
+                "gaze_norm_x",
+                "gaze_norm_y",
                 "left_avg_x",
                 "left_avg_y",
                 "right_avg_x",
@@ -454,11 +749,14 @@ def main():
             left_avg = p["left_avg"]
             right_avg = p["right_avg"]
             gaze_avg = p["gaze_avg"]
+            gaze_norm = p.get("gaze_norm_avg", {})
             writer.writerow(
                 [
                     tgt.get("filename"),
                     tgt.get("x"),
                     tgt.get("y"),
+                    gaze_norm.get("x"),
+                    gaze_norm.get("y"),
                     left_avg.get("x"),
                     left_avg.get("y"),
                     right_avg.get("x"),
@@ -473,7 +771,8 @@ def main():
     valid_for_fit = [
         p
         for p in valid_pairs
-        if p.get("gaze_avg", {}).get("x") is not None and p.get("gaze_avg", {}).get("y") is not None
+        if p.get("gaze_norm_avg", {}).get("x") is not None
+        and p.get("gaze_norm_avg", {}).get("y") is not None
     ]
 
     if len(valid_for_fit) < 3:
@@ -499,6 +798,8 @@ def main():
                     "left_avg_y": p["left_avg"]["y"],
                     "right_avg_x": p["right_avg"]["x"],
                     "right_avg_y": p["right_avg"]["y"],
+                    "gaze_norm_avg_x": p.get("gaze_norm_avg", {}).get("x"),
+                    "gaze_norm_avg_y": p.get("gaze_norm_avg", {}).get("y"),
                     "eye_avg_x": p.get("eye_avg", {}).get("x"),
                     "eye_avg_y": p.get("eye_avg", {}).get("y"),
                     "left_std_x": p["left_std"]["x"],
@@ -523,7 +824,7 @@ def main():
     model_payload = {
         "model_type": "affine_2d",
         "window_ms": WINDOW_END_OFFSET_MS - WINDOW_START_OFFSET_MS,
-        "input": "gaze_avg_xy",
+        "input": "gaze_norm_xy",
         "output": "screen_xy_pixels",
         "coeffs": {"sx": coeffs_x, "sy": coeffs_y},
     }

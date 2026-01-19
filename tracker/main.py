@@ -17,6 +17,7 @@ import os
 import argparse
 import signal
 import shutil
+import math
 import cv2
 import numpy as np
 import pandas as pd
@@ -254,6 +255,50 @@ class EyeTracker:
                 
                 is_blink = bool((ear_l < EAR_THRESHOLD) or (ear_r < EAR_THRESHOLD))
                 frame_data['is_blink'] = is_blink
+
+                # Eye box landmarks (for normalized calibration features)
+                def _lm_xy(idx):
+                    lm = lms[idx]
+                    return lm.x * self.width, lm.y * self.height
+
+                left_outer_x, left_outer_y = _lm_xy(33)
+                left_inner_x, left_inner_y = _lm_xy(133)
+                right_outer_x, right_outer_y = _lm_xy(362)
+                right_inner_x, right_inner_y = _lm_xy(263)
+
+                left_top_points = [_lm_xy(i) for i in [160, 158]]
+                left_bottom_points = [_lm_xy(i) for i in [144, 153]]
+                right_top_points = [_lm_xy(i) for i in [385, 387]]
+                right_bottom_points = [_lm_xy(i) for i in [373, 380]]
+
+                left_eye_left_x = min(left_outer_x, left_inner_x)
+                left_eye_right_x = max(left_outer_x, left_inner_x)
+                right_eye_left_x = min(right_outer_x, right_inner_x)
+                right_eye_right_x = max(right_outer_x, right_inner_x)
+
+                left_eye_top_y = min(pt[1] for pt in left_top_points)
+                left_eye_bottom_y = max(pt[1] for pt in left_bottom_points)
+                right_eye_top_y = min(pt[1] for pt in right_top_points)
+                right_eye_bottom_y = max(pt[1] for pt in right_bottom_points)
+
+                left_eye_top_x = sum(pt[0] for pt in left_top_points) / len(left_top_points)
+                left_eye_bottom_x = sum(pt[0] for pt in left_bottom_points) / len(left_bottom_points)
+                right_eye_top_x = sum(pt[0] for pt in right_top_points) / len(right_top_points)
+                right_eye_bottom_x = sum(pt[0] for pt in right_bottom_points) / len(right_bottom_points)
+
+                frame_data['left_eye_left_x'] = float(left_eye_left_x)
+                frame_data['left_eye_right_x'] = float(left_eye_right_x)
+                frame_data['left_eye_top_x'] = float(left_eye_top_x)
+                frame_data['left_eye_top_y'] = float(left_eye_top_y)
+                frame_data['left_eye_bottom_x'] = float(left_eye_bottom_x)
+                frame_data['left_eye_bottom_y'] = float(left_eye_bottom_y)
+
+                frame_data['right_eye_left_x'] = float(right_eye_left_x)
+                frame_data['right_eye_right_x'] = float(right_eye_right_x)
+                frame_data['right_eye_top_x'] = float(right_eye_top_x)
+                frame_data['right_eye_top_y'] = float(right_eye_top_y)
+                frame_data['right_eye_bottom_x'] = float(right_eye_bottom_x)
+                frame_data['right_eye_bottom_y'] = float(right_eye_bottom_y)
                 
                 if is_blink:
                     cv2.putText(frame, "BLINK", (self.width // 2 - 40, self.height // 2),
@@ -713,12 +758,20 @@ class EyeTracker:
         print(f"✓ CSV: {csv_path}")
 
         json_path = self.output_dir / f"{self.video_path.stem}_tracking_data.json"
+        json_frames = []
+        for frame in self.tracking_data:
+            cleaned = {}
+            for key, value in frame.items():
+                if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                    cleaned[key] = None
+                else:
+                    cleaned[key] = value
+            json_frames.append(cleaned)
         with open(json_path, 'w') as f:
             payload = {
-                'frames': self.tracking_data,
+                'frames': json_frames,
                 'detector_stats': getattr(self, 'detector_stats', {})
             }
-
             json.dump(payload, f, indent=2)
         print(f"✓ JSON: {json_path}")
 
@@ -753,22 +806,32 @@ class EyeTracker:
                     continue
             else:
                 continue
-            normalized.append((t_sec, filename))
+            normalized.append({
+                "t_sec": t_sec,
+                "filename": filename,
+                "protocol_key": mark.get("protocol_key"),
+                "slide_index": mark.get("slide_index"),
+            })
 
         if not normalized:
             return
 
-        normalized.sort(key=lambda item: item[0])
+        normalized.sort(key=lambda item: item["t_sec"])
         idx = 0
-        first_t = normalized[0][0]
+        first_t = normalized[0]["t_sec"]
         for frame in self.tracking_data:
             ts = frame.get("timestamp_sec")
             if ts is None:
                 continue
-            while idx + 1 < len(normalized) and normalized[idx + 1][0] <= ts:
+            while idx + 1 < len(normalized) and normalized[idx + 1]["t_sec"] <= ts:
                 idx += 1
             if ts >= first_t:
-                frame["filename"] = normalized[idx][1]
+                current = normalized[idx]
+                frame["filename"] = current["filename"]
+                if current.get("protocol_key") is not None:
+                    frame["protocol_key"] = current["protocol_key"]
+                if current.get("slide_index") is not None:
+                    frame["slide_index"] = current["slide_index"]
 
     def _generate_summary(self):
         """

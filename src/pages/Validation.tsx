@@ -33,6 +33,29 @@ type ValidationTrial = {
 };
 
 type ValidationState = "idle" | "ready" | "running" | "completed" | "error";
+type BaselineComparison = {
+    baseline: {
+        accuracy: number | null;
+        mean_error_px: number | null;
+        median_error_px: number | null;
+        worst_error_px: number | null;
+        valid_count: number | null;
+    };
+    current: {
+        accuracy: number | null;
+        mean_error_px: number | null;
+        median_error_px: number | null;
+        worst_error_px: number | null;
+        valid_count: number | null;
+    };
+    delta: {
+        accuracy: number | null;
+        mean_error_px: number | null;
+        median_error_px: number | null;
+        worst_error_px: number | null;
+        valid_count: number | null;
+    };
+};
 
 const TRIAL_DURATION_MS = 1500;
 const SCORING_WINDOW_MS = 500;
@@ -45,6 +68,12 @@ function invokeIpc(channel: string, payload?: unknown) {
     return Promise.resolve({ ok: false, error: "IPC not available" });
 }
 
+function formatSigned(val: number | null, digits = 1) {
+    if (val === null || Number.isNaN(val)) return "-";
+    const sign = val > 0 ? "+" : "";
+    return `${sign}${val.toFixed(digits)}`;
+}
+
 export default function Validation() {
     const [params] = useSearchParams();
     const sessionId = params.get("session") || "";
@@ -55,6 +84,9 @@ export default function Validation() {
     const [targets] = useState<CalibrationTarget[]>(() => getCalibrationTargets());
     const [sequence, setSequence] = useState<CalibrationTarget[]>([]);
     const [trials, setTrials] = useState<ValidationTrial[]>([]);
+    const [baselineReport, setBaselineReport] = useState<any | null>(null);
+    const [baselineComparison, setBaselineComparison] = useState<BaselineComparison | null>(null);
+    const [usingBaselineSequence, setUsingBaselineSequence] = useState(false);
     const [currentTrialNum, setCurrentTrialNum] = useState(0);
     const [liveGaze, setLiveGaze] = useState<{ x: number; y: number } | null>(null);
     const [livePredicted, setLivePredicted] = useState<{ x: number; y: number } | null>(null);
@@ -79,6 +111,15 @@ export default function Validation() {
             } else {
                 setError(res.error || "Failed to load calibration model");
                 setState("error");
+            }
+        });
+
+        invokeIpc("recordings:readJson", {
+            sessionId,
+            filename: "validation_baseline.json",
+        }).then((res: { ok: boolean; data?: any }) => {
+            if (res.ok && res.data) {
+                setBaselineReport(res.data);
             }
         });
     }, [sessionId]);
@@ -129,10 +170,17 @@ export default function Validation() {
         setError(null);
         setTrials([]);
         setCurrentTrialNum(0);
+        setBaselineComparison(null);
 
-        // Generate random sequence
-        const seq = generateValidationSequence(NUM_TRIALS, targets);
+        const baselineSeq =
+            baselineReport?.trials?.length === NUM_TRIALS
+                ? baselineReport.trials.map((t: ValidationTrial) => t.actual_target)
+                : null;
+
+        // Use baseline sequence if available to compare runs
+        const seq = baselineSeq ?? generateValidationSequence(NUM_TRIALS, targets);
         setSequence(seq);
+        setUsingBaselineSequence(!!baselineSeq);
 
         // Start gaze stream
         const res = await startGazeStream({ fps: 30 });
@@ -147,7 +195,7 @@ export default function Validation() {
             setState("running");
             runTrial(0, seq);
         }, 1000);
-    }, [model, targets]);
+    }, [model, targets, baselineReport]);
 
     const runTrial = useCallback(
         (trialNum: number, seq: CalibrationTarget[]) => {
@@ -290,6 +338,69 @@ export default function Validation() {
                     ? trials.find((t) => t.error_px === worstError)?.trial_num
                     : null;
 
+            const currentSummary = {
+                accuracy: validTrials.length > 0 ? correctTrials.length / validTrials.length : 0,
+                mean_error_px: meanError,
+                median_error_px: medianError,
+                worst_error_px: worstError,
+                valid_count: validTrials.length,
+            };
+
+            let baselineStats: BaselineComparison | null = null;
+            if (baselineReport && usingBaselineSequence) {
+                const baselineSummary = baselineReport.summary || {};
+                const baselineAccuracy =
+                    typeof baselineSummary.accuracy === "number"
+                        ? baselineSummary.accuracy
+                        : null;
+                const baselineMean =
+                    typeof baselineSummary.mean_error_px === "number"
+                        ? baselineSummary.mean_error_px
+                        : null;
+                const baselineMedian =
+                    typeof baselineSummary.median_error_px === "number"
+                        ? baselineSummary.median_error_px
+                        : null;
+                const baselineWorst =
+                    typeof baselineSummary.worst_error_px === "number"
+                        ? baselineSummary.worst_error_px
+                        : null;
+                const baselineValid =
+                    typeof baselineSummary.valid_count === "number"
+                        ? baselineSummary.valid_count
+                        : null;
+
+                baselineStats = {
+                    baseline: {
+                        accuracy: baselineAccuracy,
+                        mean_error_px: baselineMean,
+                        median_error_px: baselineMedian,
+                        worst_error_px: baselineWorst,
+                        valid_count: baselineValid,
+                    },
+                    current: currentSummary,
+                    delta: {
+                        accuracy:
+                            baselineAccuracy === null ? null : currentSummary.accuracy - baselineAccuracy,
+                        mean_error_px:
+                            baselineMean === null || currentSummary.mean_error_px === null
+                                ? null
+                                : currentSummary.mean_error_px - baselineMean,
+                        median_error_px:
+                            baselineMedian === null || currentSummary.median_error_px === null
+                                ? null
+                                : currentSummary.median_error_px - baselineMedian,
+                        worst_error_px:
+                            baselineWorst === null || currentSummary.worst_error_px === null
+                                ? null
+                                : currentSummary.worst_error_px - baselineWorst,
+                        valid_count:
+                            baselineValid === null ? null : currentSummary.valid_count - baselineValid,
+                    },
+                };
+                setBaselineComparison(baselineStats);
+            }
+
             const report = {
                 session_id: sessionId,
                 model_file: "calibration_model.json",
@@ -297,22 +408,34 @@ export default function Validation() {
                 num_trials: NUM_TRIALS,
                 trials,
                 summary: {
-                    accuracy: validTrials.length > 0 ? correctTrials.length / validTrials.length : 0,
+                    accuracy: currentSummary.accuracy,
                     correct_count: correctTrials.length,
-                    valid_count: validTrials.length,
-                    mean_error_px: meanError,
-                    median_error_px: medianError,
-                    worst_error_px: worstError,
+                    valid_count: currentSummary.valid_count,
+                    mean_error_px: currentSummary.mean_error_px,
+                    median_error_px: currentSummary.median_error_px,
+                    worst_error_px: currentSummary.worst_error_px,
                     worst_trial_num: worstTrialNum,
                 },
+                baseline: baselineReport
+                    ? { file: "validation_baseline.json", timestamp: baselineReport.timestamp }
+                    : { file: "validation_baseline.json", created: true },
+                baseline_comparison: baselineStats,
             };
 
             await invokeIpc("session:write-json", {
                 filePath: `recordings/${sessionId}/validation_report.json`,
                 data: report,
             });
+
+            if (!baselineReport) {
+                await invokeIpc("session:write-json", {
+                    filePath: `recordings/${sessionId}/validation_baseline.json`,
+                    data: report,
+                });
+                setBaselineReport(report);
+            }
         }
-    }, [sessionId, trials]);
+    }, [sessionId, trials, baselineReport, usingBaselineSequence]);
 
     const reset = useCallback(() => {
         setState("idle");
@@ -322,6 +445,8 @@ export default function Validation() {
         setLiveGaze(null);
         setLivePredicted(null);
         setLiveClassified(null);
+        setBaselineComparison(null);
+        setUsingBaselineSequence(false);
     }, []);
 
     // Current trial target
@@ -414,13 +539,19 @@ export default function Validation() {
                             • Gaze averaged over last {SCORING_WINDOW_MS}ms
                             <br />• Minimum {MIN_SAMPLES} samples required per trial
                         </div>
+                        {baselineReport && (
+                            <div className="mt-3 text-xs text-gray-500">
+                                Baseline found ({baselineReport.timestamp}); next run will compare
+                                against it.
+                            </div>
+                        )}
                     </div>
 
                     <button
                         className="px-4 py-2 rounded-lg bg-gray-900 text-white"
                         onClick={startValidation}
                     >
-                        Start Validation ({NUM_TRIALS} trials)
+                        {baselineReport ? "Start Validation (compare)" : "Start Validation (baseline)"}
                     </button>
                 </div>
             )}
@@ -550,6 +681,100 @@ export default function Validation() {
                             </button>
                         </div>
                     </div>
+
+                    {baselineComparison && (
+                        <div className="rounded-lg border bg-white overflow-hidden">
+                            <div className="px-3 py-2 border-b text-sm font-semibold">
+                                Baseline comparison (current vs baseline)
+                            </div>
+                            <div className="overflow-auto">
+                                <table className="min-w-full text-sm">
+                                    <thead className="bg-gray-50 text-gray-600">
+                                        <tr>
+                                            <th className="text-left px-3 py-2">Metric</th>
+                                            <th className="text-left px-3 py-2">Baseline</th>
+                                            <th className="text-left px-3 py-2">Current</th>
+                                            <th className="text-left px-3 py-2">Δ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-t">
+                                            <td className="px-3 py-2">Accuracy</td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.baseline.accuracy !== null
+                                                    ? `${(baselineComparison.baseline.accuracy * 100).toFixed(1)}%`
+                                                    : "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.current.accuracy !== null
+                                                    ? `${(baselineComparison.current.accuracy * 100).toFixed(1)}%`
+                                                    : "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.delta.accuracy !== null
+                                                    ? `${formatSigned(
+                                                        baselineComparison.delta.accuracy * 100,
+                                                        1
+                                                    )}%`
+                                                    : "-"}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-t">
+                                            <td className="px-3 py-2">Mean error (px)</td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.baseline.mean_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.current.mean_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {formatSigned(baselineComparison.delta.mean_error_px, 1)}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-t">
+                                            <td className="px-3 py-2">Median error (px)</td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.baseline.median_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.current.median_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {formatSigned(baselineComparison.delta.median_error_px, 1)}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-t">
+                                            <td className="px-3 py-2">Worst error (px)</td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.baseline.worst_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.current.worst_error_px?.toFixed(1) ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {formatSigned(baselineComparison.delta.worst_error_px, 1)}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-t">
+                                            <td className="px-3 py-2">Valid trials</td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.baseline.valid_count ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {baselineComparison.current.valid_count ?? "-"}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                                {formatSigned(
+                                                    baselineComparison.delta.valid_count,
+                                                    0
+                                                )}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Trial-by-trial table */}
                     <div className="rounded-lg border bg-white overflow-hidden">
