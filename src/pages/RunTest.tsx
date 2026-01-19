@@ -54,6 +54,13 @@ function newSessionId() {
   return `sample_video_${yyyy}${mm}${dd}_${hh}${min}${ss}`;
 }
 
+// Helper for IPC calls
+function invokeIpc(channel: string, payload?: any) {
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke(channel, payload);
+  if (window.ipcRenderer?.invoke) return window.ipcRenderer.invoke(channel, payload);
+  return Promise.resolve({ ok: false, error: "IPC not available" });
+}
+
 export default function RunTest() {
   // --- Patients ---
   const [params, setParams] = useSearchParams();
@@ -99,6 +106,7 @@ export default function RunTest() {
   const [headStatus, setHeadStatus] = useState<HeadPositionStatus>("NOT_DETECTED");
   const [headInstruction, setHeadInstruction] = useState<string>("Face not detected");
   const [headProgress, setHeadProgress] = useState<number>(0);
+  const [headCheckActive, setHeadCheckActive] = useState<boolean>(false);
 
   const clearSlideDelay = useCallback(() => {
     if (slideDelayTimer.current !== null) {
@@ -146,6 +154,7 @@ export default function RunTest() {
 
   useEffect(() => {
     const unsubscribe = subscribeHeadPosition((payload) => {
+      console.log("[head] update received:", payload.status, payload.instruction);
       setHeadStatus(payload.status);
       setHeadInstruction(payload.instruction ?? "");
       setHeadProgress(payload.progress ?? 0);
@@ -155,17 +164,14 @@ export default function RunTest() {
     };
   }, []);
 
-  useEffect(() => {
-    if (trackerStatus === "running") {
-      stopHeadPosition().catch(() => {});
-      return;
-    }
-    startHeadPosition({ fps: 20 }).catch(() => {});
-  }, [trackerStatus]);
+  // Removed automatic head position startup - now manual via button
 
+  // Cleanup: stop head position on unmount
   useEffect(() => {
     return () => {
-      stopHeadPosition().catch(() => {});
+      console.log("[head] stop requested (cleanup)");
+      stopHeadPosition().catch(() => { });
+      setHeadCheckActive(false);
     };
   }, []);
 
@@ -417,7 +423,35 @@ export default function RunTest() {
     }
   }, [lastEnded, running, sessionId, navigate]);
 
+  async function startHeadCheck() {
+    if (headCheckActive || busy) return;
+    console.log("[head] start requested");
+    setHeadCheckActive(true);
+    setError(null);
+    try {
+      const res = await startHeadPosition({ fps: 20 });
+      if (!res.ok) {
+        setError(`Head check failed: ${res.message}`);
+        setHeadCheckActive(false);
+      }
+    } catch (err) {
+      setError("Head check failed to start");
+      setHeadCheckActive(false);
+    }
+  }
+
+  async function stopHeadCheck() {
+    if (!headCheckActive) return;
+    console.log("[head] stop requested (manual)");
+    await stopHeadPosition().catch(() => { });
+    setHeadCheckActive(false);
+    setHeadStatus("NOT_DETECTED");
+    setHeadInstruction("Face not detected");
+    setHeadProgress(0);
+  }
+
   async function startSession() {
+
     if (!patient || busy || headStatus !== "READY") {
       if (headStatus !== "READY") {
         setError("Align your head to continue.");
@@ -469,12 +503,14 @@ export default function RunTest() {
     // So I should probably pass the full path or relative to CWD.
     // If I pass `recordings/${sid}`, and CWD is APP_ROOT, it should work.
 
-    await stopHeadPosition().catch(() => {});
+    console.log("[head] stop requested (session starting)");
+    await stopHeadPosition().catch(() => { });
+    setHeadCheckActive(false);
     const res = await startTracker({ preview: false, outDir: `recordings/${sid}` }).catch(() => ({ ok: false, message: "IPC error" }));
     if (!res.ok) {
       setError(`Could not start tracker: ${res.message}`);
       setBusy(false);
-      await startHeadPosition({ fps: 20 }).catch(() => {});
+      await startHeadPosition({ fps: 20 }).catch(() => { });
       return;
     }
 
@@ -498,7 +534,7 @@ export default function RunTest() {
     if (trackerInfo.status !== "running") {
       setError("Tracker failed to start (camera not ready).");
       setBusy(false);
-      await startHeadPosition({ fps: 20 }).catch(() => {});
+      await startHeadPosition({ fps: 20 }).catch(() => { });
       return;
     }
 
@@ -568,7 +604,23 @@ export default function RunTest() {
       addSessionSummary(summary);
     }
 
-    await startHeadPosition({ fps: 20 }).catch(() => {});
+    await startHeadPosition({ fps: 20 }).catch(() => { });
+
+    // Auto-run calibration if we have targets
+    if (calibrationTargetsRef.current.length > 0) {
+      console.log('[calibration] auto-running calibration fit...');
+      const calRes = await invokeIpc('calibration:run', { sessionId }).catch((err) => {
+        console.error('[calibration] auto-run failed:', err);
+        return { ok: false, error: String(err) };
+      });
+
+      if (calRes.ok) {
+        console.log('[calibration] auto-run complete');
+      } else {
+        console.warn('[calibration] auto-run error:', calRes.error);
+      }
+    }
+
     setBusy(false);
   }
 
@@ -639,16 +691,31 @@ export default function RunTest() {
         {busy && <span className="text-xs text-gray-500">…working</span>}
       </div>
 
+
+
       <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
-        <div className="text-sm text-gray-700">{headInstruction || "Align your head"}</div>
+        <div className="text-sm text-gray-700">{headInstruction || "Click 'Start Head Check' to begin"}</div>
         <div className="ml-auto flex items-center gap-2">
-          <div className="w-40 h-2 bg-gray-200 rounded">
-            <div
-              className="h-2 bg-gray-900 rounded"
-              style={{ width: `${Math.round(headProgress * 100)}%` }}
-            />
-          </div>
-          <span className="text-xs text-gray-500">{Math.round(headProgress * 100)}%</span>
+          {!running && (
+            <button
+              className="px-3 py-1.5 rounded bg-gray-900 text-white text-sm disabled:opacity-60"
+              onClick={headCheckActive ? stopHeadCheck : startHeadCheck}
+              disabled={busy}
+            >
+              {headCheckActive ? "Stop Head Check" : "Start Head Check"}
+            </button>
+          )}
+          {headCheckActive && (
+            <>
+              <div className="w-40 h-2 bg-gray-200 rounded">
+                <div
+                  className="h-2 bg-gray-900 rounded"
+                  style={{ width: `${Math.round(headProgress * 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-500">{Math.round(headProgress * 100)}%</span>
+            </>
+          )}
         </div>
       </div>
 

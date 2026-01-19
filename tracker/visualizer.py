@@ -45,8 +45,9 @@ def draw_overlay(frame, data, total_frames):
         cv2.putText(frame, f"Gaze: ({int(data['gaze_x'])},{int(data['gaze_y'])})",
                     (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['mid'], 1)
     y += 25
-    # just a hint about colors
-    cv2.putText(frame, "Green=MP center  Yellow=Final center  Orange=LR edges  Magenta=TB edges",
+    # Legend text (raw data always present, visual overlay conditional)
+    legend_text = "Green=MP center  Yellow=Final center  Orange=LR edges  Magenta=TB edges  Red=RAW"
+    cv2.putText(frame, legend_text,
                 (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, VIS_COLORS['text'], 1)
 
     if data.get('head_status') == "READY":

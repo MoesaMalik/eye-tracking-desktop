@@ -38,6 +38,17 @@ contextBridge.exposeInMainWorld("onHeadPositionUpdate", (cb: (payload: any) => v
   subscribe("head_position:update", cb)
 );
 
+/* -------- Gaze stream bridge -------- */
+contextBridge.exposeInMainWorld("startGazeStream", (opts: { cam?: number; fps?: number; script?: string } = {}) =>
+  ipcRenderer.invoke("gaze_stream:start", opts)
+);
+contextBridge.exposeInMainWorld("stopGazeStream", () =>
+  ipcRenderer.invoke("gaze_stream:stop")
+);
+contextBridge.exposeInMainWorld("onGazeUpdate", (cb: (payload: any) => void) =>
+  subscribe("gaze_stream:update", cb)
+);
+
 /* -------- Optional thin ipcRenderer exposure -------- */
 contextBridge.exposeInMainWorld("ipcRenderer", {
   on(channel: string, listener: (event: unknown, ...args: any[]) => void) {

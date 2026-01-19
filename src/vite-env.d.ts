@@ -41,7 +41,12 @@ declare global {
     }) => Promise<{ ok: boolean; message: string }>;
     stopHeadPosition?: () => Promise<{ ok: boolean; message: string }>;
     onHeadPositionUpdate?: (cb: (payload: any) => void) => () => void;
+
+    // Gaze stream functions
+    startGazeStream?: (opts?: { cam?: number; fps?: number; script?: string }) => Promise<{ ok: boolean; message: string }>;
+    stopGazeStream?: () => Promise<{ ok: boolean; message: string }>;
+    onGazeUpdate?: (cb: (payload: any) => void) => () => void;
   }
 }
 
-export {};
+export { };

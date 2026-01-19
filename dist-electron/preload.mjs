@@ -28,6 +28,18 @@ electron.contextBridge.exposeInMainWorld(
   "onHeadPositionUpdate",
   (cb) => subscribe("head_position:update", cb)
 );
+electron.contextBridge.exposeInMainWorld(
+  "startGazeStream",
+  (opts = {}) => electron.ipcRenderer.invoke("gaze_stream:start", opts)
+);
+electron.contextBridge.exposeInMainWorld(
+  "stopGazeStream",
+  () => electron.ipcRenderer.invoke("gaze_stream:stop")
+);
+electron.contextBridge.exposeInMainWorld(
+  "onGazeUpdate",
+  (cb) => subscribe("gaze_stream:update", cb)
+);
 electron.contextBridge.exposeInMainWorld("ipcRenderer", {
   on(channel, listener) {
     const wrapped = (event, ...args) => listener(event, ...args);

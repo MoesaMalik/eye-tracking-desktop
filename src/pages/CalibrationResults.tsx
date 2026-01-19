@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ResponsiveContainer,
   ScatterChart,
@@ -224,9 +225,9 @@ export default function CalibrationResults() {
 
   const scatterPredicted = hasModel
     ? validPairs.map((p) => {
-        const pred = predict(p.gaze_avg.x!, p.gaze_avg.y!);
-        return { x: pred.x, y: pred.y, name: p.target.filename };
-      })
+      const pred = predict(p.gaze_avg.x!, p.gaze_avg.y!);
+      return { x: pred.x, y: pred.y, name: p.target.filename };
+    })
     : [];
 
   const tableRows = pairs.map((p) => {
@@ -291,9 +292,8 @@ export default function CalibrationResults() {
                 return (
                   <button
                     key={session.sessionId}
-                    className={`w-full text-left px-3 py-2 rounded border ${
-                      selected ? "bg-gray-900 text-white border-gray-900" : "bg-white"
-                    } ${!session.hasCalibration ? "opacity-70" : ""}`}
+                    className={`w-full text-left px-3 py-2 rounded border ${selected ? "bg-gray-900 text-white border-gray-900" : "bg-white"
+                      } ${!session.hasCalibration ? "opacity-70" : ""}`}
                     onClick={() => setSelectedSession(session.sessionId)}
                   >
                     <div className="text-sm font-medium">{session.sessionId}</div>
@@ -354,13 +354,23 @@ export default function CalibrationResults() {
                 <div className="text-sm text-gray-600">
                   Session: <span className="font-medium">{selectedSession}</span>
                 </div>
-                <button
-                  className="px-3 py-1.5 rounded border bg-white text-sm"
-                  onClick={runCalibration}
-                  disabled={runStatus === "running"}
-                >
-                  {runStatus === "running" ? "Running calibration..." : "Run calibration now"}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    className="px-3 py-1.5 rounded border bg-white text-sm"
+                    onClick={runCalibration}
+                    disabled={runStatus === "running"}
+                  >
+                    {runStatus === "running" ? "Running calibration..." : "Run calibration now"}
+                  </button>
+                  {hasModel && (
+                    <Link
+                      to={`/validation?session=${selectedSession}`}
+                      className="px-3 py-1.5 rounded border bg-gray-900 text-white text-sm inline-block"
+                    >
+                      Start Validation
+                    </Link>
+                  )}
+                </div>
               </div>
               {runOutput && (
                 <pre className="text-xs bg-gray-50 border rounded p-2 whitespace-pre-wrap">

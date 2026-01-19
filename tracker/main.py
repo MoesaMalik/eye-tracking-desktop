@@ -65,9 +65,21 @@ MIN_CONF = 0.4
 # EAR Threshold for Blink
 EAR_THRESHOLD = 0.20
 
-# OneEuroFilter Params
-ONE_EURO_MIN_CUTOFF = 0.01
-ONE_EURO_BETA = 0.005
+# OneEuroFilter Smoothing Presets
+# These are defaults - can be overridden via CLI args
+SMOOTHING_PRESETS = {
+    'off': {'min_cutoff': None, 'beta': None},  # No filtering
+    'light': {'min_cutoff': 1.0, 'beta': 0.02},  # Minimal smoothing, very responsive
+    'medium': {'min_cutoff': 0.5, 'beta': 0.01},  # Balanced
+    'heavy': {'min_cutoff': 0.1, 'beta': 0.005},  # Heavy smoothing (old default was even heavier)
+}
+
+# Default smoothing mode
+DEFAULT_SMOOTHING_MODE = 'light'
+
+# Debug overlay: show raw (unsmoothed) iris centers
+# Controlled by --show-raw-overlay CLI flag (default: False)
+SHOW_RAW_OVERLAY = True
 
 # Eye landmarks (MediaPipe FaceMesh indices) - Used for EAR
 # Standard 6-point (P1, P2, P3, P4, P5, P6)
@@ -107,10 +119,23 @@ class EyeTracker:
     """
     Main class that orchestrates video loading, processing, and tracking.
     """
-    def __init__(self, video_path, output_dir="output"):
+    def __init__(self, video_path, output_dir="output", show_raw_overlay=False, 
+                 smoothing_mode='light', min_cutoff=None, beta=None):
         self.video_path = Path(video_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.show_raw_overlay = show_raw_overlay
+        
+        # Smoothing configuration
+        self.smoothing_mode = smoothing_mode
+        if smoothing_mode == 'off':
+            self.min_cutoff = None
+            self.beta = None
+        else:
+            # Use preset values unless overridden
+            preset = SMOOTHING_PRESETS.get(smoothing_mode, SMOOTHING_PRESETS['light'])
+            self.min_cutoff = min_cutoff if min_cutoff is not None else preset['min_cutoff']
+            self.beta = beta if beta is not None else preset['beta']
 
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -139,6 +164,16 @@ class EyeTracker:
         print(f"FPS: {self.fps:.2f}")
         print(f"Total Frames: {self.total_frames}")
         print(f"Duration: {self.duration_sec:.2f}s")
+        print(f"[overlay] raw overlay {'enabled' if self.show_raw_overlay else 'disabled'}")
+        
+        # Print smoothing config to stderr
+        import sys
+        if self.smoothing_mode == 'off':
+            print(f"[smoothing] mode=off (no filtering)", file=sys.stderr)
+        else:
+            print(f"[smoothing] mode={self.smoothing_mode} min_cutoff={self.min_cutoff} beta={self.beta}", 
+                  file=sys.stderr)
+        
         print(f"{'=' * 70}\n")
 
     def process_video(self):
@@ -360,22 +395,44 @@ class EyeTracker:
                             method = method_base
                             conf_used = conf
                         
-                        # Apply OneEuroFilter
-                        if self.filter_lx is None:
-                            self.filter_lx = OneEuroFilter(timestamp_sec, lcx_abs, min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA)
-                            self.filter_ly = OneEuroFilter(timestamp_sec, lcy_abs, min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA)
+                        # RAW values (before OneEuroFilter smoothing)
+                        # These represent the chosen best-fit center for this frame
+                        lcx_raw = lcx_abs  # Save raw before filtering
+                        lcy_raw = lcy_abs
                         
-                        lcx_abs = self.filter_lx(timestamp_sec, lcx_abs)
-                        lcy_abs = self.filter_ly(timestamp_sec, lcy_abs)
+                        # Apply OneEuroFilter (if smoothing enabled)
+                        if self.smoothing_mode != 'off':
+                            if self.filter_lx is None:
+                                self.filter_lx = OneEuroFilter(timestamp_sec, lcx_abs, 
+                                                               min_cutoff=self.min_cutoff, beta=self.beta)
+                                self.filter_ly = OneEuroFilter(timestamp_sec, lcy_abs, 
+                                                               min_cutoff=self.min_cutoff, beta=self.beta)
+                            
+                            lcx_abs = self.filter_lx(timestamp_sec, lcx_abs)
+                            lcy_abs = self.filter_ly(timestamp_sec, lcy_abs)
+                        # else: smoothing off, lcx_abs stays as raw value
 
                         frame_data['left_center_x'] = lcx_abs
                         frame_data['left_center_y'] = lcy_abs
                         frame_data['left_confidence'] = float(conf_used)
                         frame_data['left_method'] = method
+                        
+                        # Always store raw values in frame_data for analysis
+                        frame_data['left_center_x_raw'] = float(lcx_raw)
+                        frame_data['left_center_y_raw'] = float(lcy_raw)
 
-                        # Draw final left iris center (yellow)
+                        # Draw final left iris center (yellow - smoothed)
                         cv2.circle(frame, (int(round(lcx_abs)), int(round(lcy_abs))),
                                    5, VIS_COLORS['mid'], -1)
+                        
+                        # Draw RAW left iris center (red crosshair) if debug overlay enabled
+                        if self.show_raw_overlay:
+                            # Draw small crosshair for raw position
+                            rx, ry = int(round(lcx_raw)), int(round(lcy_raw))
+                            crosshair_size = 6
+                            cv2.line(frame, (rx - crosshair_size, ry), (rx + crosshair_size, ry), (0, 0, 255), 1)
+                            cv2.line(frame, (rx, ry - crosshair_size), (rx, ry + crosshair_size), (0, 0, 255), 1)
+                            cv2.circle(frame, (rx, ry), 2, (0, 0, 255), 1)  # Small circle at center
 
                         # Draw and store extrema if available
                         if x_min is not None:
@@ -498,22 +555,44 @@ class EyeTracker:
                             method = method_base
                             conf_used = conf
                         
-                        # Apply OneEuroFilter
-                        if self.filter_rx is None:
-                            self.filter_rx = OneEuroFilter(timestamp_sec, rcx_abs, min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA)
-                            self.filter_ry = OneEuroFilter(timestamp_sec, rcy_abs, min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA)
+                        # RAW values (before OneEuroFilter smoothing)
+                        # These represent the chosen best-fit center for this frame
+                        rcx_raw = rcx_abs  # Save raw before filtering
+                        rcy_raw = rcy_abs
                         
-                        rcx_abs = self.filter_rx(timestamp_sec, rcx_abs)
-                        rcy_abs = self.filter_ry(timestamp_sec, rcy_abs)
+                        # Apply OneEuroFilter (if smoothing enabled)
+                        if self.smoothing_mode != 'off':
+                            if self.filter_rx is None:
+                                self.filter_rx = OneEuroFilter(timestamp_sec, rcx_abs, 
+                                                               min_cutoff=self.min_cutoff, beta=self.beta)
+                                self.filter_ry = OneEuroFilter(timestamp_sec, rcy_abs, 
+                                                               min_cutoff=self.min_cutoff, beta=self.beta)
+                            
+                            rcx_abs = self.filter_rx(timestamp_sec, rcx_abs)
+                            rcy_abs = self.filter_ry(timestamp_sec, rcy_abs)
+                        # else: smoothing off, rcx_abs stays as raw value
 
                         frame_data['right_center_x'] = rcx_abs
                         frame_data['right_center_y'] = rcy_abs
                         frame_data['right_confidence'] = float(conf_used)
                         frame_data['right_method'] = method
+                        
+                        # Always store raw values in frame_data for analysis
+                        frame_data['right_center_x_raw'] = float(rcx_raw)
+                        frame_data['right_center_y_raw'] = float(rcy_raw)
 
-                        # Draw final right iris center (yellow)
+                        # Draw final right iris center (yellow - smoothed)
                         cv2.circle(frame, (int(round(rcx_abs)), int(round(rcy_abs))),
                                    5, VIS_COLORS['mid'], -1)
+                        
+                        # Draw RAW right iris center (red crosshair) if debug overlay enabled
+                        if self.show_raw_overlay:
+                            # Draw small crosshair for raw position
+                            rx, ry = int(round(rcx_raw)), int(round(rcy_raw))
+                            crosshair_size = 6
+                            cv2.line(frame, (rx - crosshair_size, ry), (rx + crosshair_size, ry), (0, 0, 255), 1)
+                            cv2.line(frame, (rx, ry - crosshair_size), (rx, ry + crosshair_size), (0, 0, 255), 1)
+                            cv2.circle(frame, (rx, ry), 2, (0, 0, 255), 1)  # Small circle at center
 
                         # Draw and store extrema if available
                         if x_min is not None:
@@ -586,9 +665,15 @@ class EyeTracker:
 
                     frame_data['right_iris_diameter'] = float(right_diam)
 
-                    # Per-frame gaze (no temporal smoothing, just geometric mean)
+
+                    # Per-frame gaze (smoothed or raw depending on mode)
                     frame_data['gaze_x'] = (frame_data['left_center_x'] + frame_data['right_center_x']) / 2.0
                     frame_data['gaze_y'] = (frame_data['left_center_y'] + frame_data['right_center_y']) / 2.0
+                    
+                    # Raw gaze (always computed from raw eye coordinates if available)
+                    if 'left_center_x_raw' in frame_data and 'right_center_x_raw' in frame_data:
+                        frame_data['gaze_x_raw'] = (frame_data['left_center_x_raw'] + frame_data['right_center_x_raw']) / 2.0
+                        frame_data['gaze_y_raw'] = (frame_data['left_center_y_raw'] + frame_data['right_center_y_raw']) / 2.0
 
             else:
                 head_result = head_positioner.assess(None)
@@ -686,6 +771,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Eye tracking recorder/analyzer")
     parser.add_argument("--no-preview", action="store_true", help="Disable the OpenCV preview window")
     parser.add_argument("--output-dir", type=str, default=None, help="Custom output directory for recordings")
+    parser.add_argument("--show-raw-overlay", action="store_true", help="Show raw (unsmoothed) iris centers in overlay (debug)")
+    parser.add_argument("--smoothing", type=str, choices=['off', 'light', 'medium', 'heavy'],
+                       default=DEFAULT_SMOOTHING_MODE, help="Smoothing preset (default: light)")
+    parser.add_argument("--min-cutoff", type=float, default=None, help="Override min_cutoff (Hz) for OneEuroFilter")
+    parser.add_argument("--beta", type=float, default=None, help="Override beta for OneEuroFilter")
     return parser.parse_args()
 
 
@@ -700,6 +790,8 @@ def main():
     args = parse_args()
     show_preview = not args.no_preview
     output_dir = args.output_dir if args.output_dir else "recordings"
+    # Use module default if CLI flag not explicitly provided
+    show_raw = args.show_raw_overlay if args.show_raw_overlay else SHOW_RAW_OVERLAY
 
     print("\n" + "=" * 70)
     print("EYE TRACKING - RECORD & ANALYZE (Improved Algorithm)")
@@ -720,7 +812,14 @@ def main():
     process_output_dir = Path(use_video).parent
 
     try:
-        tracker = EyeTracker(use_video, output_dir=str(process_output_dir))
+        tracker = EyeTracker(
+            use_video, 
+            output_dir=str(process_output_dir), 
+            show_raw_overlay=show_raw,
+            smoothing_mode=args.smoothing,
+            min_cutoff=args.min_cutoff,
+            beta=args.beta
+        )
         tracker.process_video()
         print(f"[OK] DONE. Check '{process_output_dir}/' folder.\n")
     except Exception as e:

@@ -249,6 +249,79 @@ ipcMain.handle("head_position:stop", async () => {
   stopHeadPositionProcess();
   return { ok: true, message: "stopped" };
 });
+let gazeStreamProc = null;
+let gazeStreamBuffer = "";
+function stopGazeStreamProcess() {
+  if (gazeStreamProc && !gazeStreamProc.killed) {
+    try {
+      gazeStreamProc.kill();
+    } catch {
+    }
+  }
+  gazeStreamProc = null;
+  gazeStreamBuffer = "";
+}
+function handleGazeStreamStdout(chunk) {
+  gazeStreamBuffer += chunk.toString();
+  const lines = gazeStreamBuffer.split(/\r?\n/);
+  gazeStreamBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const payload = JSON.parse(trimmed);
+      if ((payload == null ? void 0 : payload.type) === "gaze" || (payload == null ? void 0 : payload.type) === "ready") {
+        win == null ? void 0 : win.webContents.send("gaze_stream:update", payload);
+      }
+    } catch {
+    }
+  }
+}
+ipcMain.handle(
+  "gaze_stream:start",
+  async (_e, opts = {}) => {
+    if (gazeStreamProc && !gazeStreamProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+    const python = resolvePython();
+    const scriptPath = opts.script ? path.isAbsolute(opts.script) ? opts.script : path.join(process.env.APP_ROOT, opts.script) : path.join(process.env.APP_ROOT, "tracker", "live_gaze_stream.py");
+    const args = [scriptPath];
+    if (typeof opts.cam === "number") {
+      args.push("--cam", String(opts.cam));
+    }
+    if (typeof opts.fps === "number") {
+      args.push("--fps", String(opts.fps));
+    }
+    try {
+      gazeStreamProc = spawn(python, args, {
+        cwd: process.env.APP_ROOT,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1"
+        }
+      });
+      gazeStreamProc.stdout.on("data", handleGazeStreamStdout);
+      gazeStreamProc.stderr.on("data", (buf) => {
+        const msg = buf.toString();
+        if (msg.trim()) {
+          console.warn("[gaze_stream]", msg.trim());
+        }
+      });
+      gazeStreamProc.on("close", () => {
+        gazeStreamProc = null;
+        gazeStreamBuffer = "";
+      });
+      return { ok: true, message: "started" };
+    } catch (err) {
+      gazeStreamProc = null;
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle("gaze_stream:stop", async () => {
+  stopGazeStreamProcess();
+  return { ok: true, message: "stopped" };
+});
 ipcMain.handle("annotation:list-videos", async () => {
   const recDir = path.join(process.env.APP_ROOT, "recordings");
   if (!fs.existsSync(recDir)) return [];
@@ -430,6 +503,7 @@ if (!gotLock) {
   });
   app.on("before-quit", () => {
     stopHeadPositionProcess();
+    stopGazeStreamProcess();
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();

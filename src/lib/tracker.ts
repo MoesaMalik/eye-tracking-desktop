@@ -1,4 +1,4 @@
-// src/lib/tracker.ts
+// src/lib/tracker.ts (extending existing file)
 export type TrackerStatus = "idle" | "running" | "stopped" | "error";
 
 export type TrackerStartOptions = {
@@ -31,6 +31,15 @@ export type HeadPositionStartOptions = {
   jsonl?: boolean;
 };
 
+// NEW: Live gaze data type
+export type GazeUpdate = {
+  type: "gaze";
+  timestamp: number;
+  gaze_x: number | null;
+  gaze_y: number | null;
+  confidence: number;
+};
+
 export async function startTracker(
   opts: TrackerStartOptions = {}
 ): Promise<{ ok: boolean; message: string }> {
@@ -54,15 +63,15 @@ export async function getTrackerStatus(): Promise<{ status: TrackerStatus; pid?:
 
 export function subscribeTrackerLogs(listener: (line: string) => void): () => void {
   if (window.tracker?.onStdout) return window.tracker.onStdout(listener);
-  return () => {};
+  return () => { };
 }
 export function subscribeTrackerErrors(listener: (line: string) => void): () => void {
   if (window.tracker?.onStderr) return window.tracker.onStderr(listener);
-  return () => {};
+  return () => { };
 }
 export function subscribeTrackerExit(listener: (code: number) => void): () => void {
   if (window.tracker?.onExit) return window.tracker.onExit(listener);
-  return () => {};
+  return () => { };
 }
 
 export async function openTrackerOutput(): Promise<{ ok: boolean; path: string }> {
@@ -93,5 +102,51 @@ export function subscribeHeadPosition(
     window.ipcRenderer.on("head_position:update", wrapped);
     return () => window.ipcRenderer?.off?.("head_position:update", wrapped);
   }
-  return () => {};
+  return () => { };
+}
+
+// NEW: Subscribe to live gaze data
+export function subscribeGazeData(
+  listener: (payload: GazeUpdate) => void
+): () => void {
+  // Parse gaze data from tracker stdout
+  return subscribeTrackerLogs((line) => {
+    try {
+      const data = JSON.parse(line);
+      if (data.type === "gaze") {
+        listener(data as GazeUpdate);
+      }
+    } catch {
+      // Not JSON or not gaze data, ignore
+    }
+  });
+}
+
+// NEW: Start live gaze stream
+export async function startGazeStream(
+  opts: { cam?: number; fps?: number; script?: string } = {}
+): Promise<{ ok: boolean; message: string }> {
+  if (window.startGazeStream) return window.startGazeStream(opts);
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke("gaze_stream:start", opts);
+  return { ok: false, message: "IPC not available" };
+}
+
+// NEW: Stop live gaze stream
+export async function stopGazeStream(): Promise<{ ok: boolean; message: string }> {
+  if (window.stopGazeStream) return window.stopGazeStream();
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke("gaze_stream:stop");
+  return { ok: false, message: "IPC not available" };
+}
+
+// NEW: Subscribe to gaze stream updates
+export function subscribeGazeStream(
+  listener: (payload: GazeUpdate) => void
+): () => void {
+  if (window.onGazeUpdate) return window.onGazeUpdate(listener);
+  if (window.ipcRenderer?.on && window.ipcRenderer?.off) {
+    const wrapped = (_event: unknown, payload: GazeUpdate) => listener(payload);
+    window.ipcRenderer.on("gaze_stream:update", wrapped);
+    return () => window.ipcRenderer?.off?.("gaze_stream:update", wrapped);
+  }
+  return () => { };
 }

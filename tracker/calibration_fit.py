@@ -8,7 +8,11 @@ from pathlib import Path
 
 import numpy as np
 
-WINDOW_MS = 500
+# Physiological fixation window after target appears
+# User needs ~500ms to complete saccade and begin stable fixation
+# Sample during stable period from 500-1250ms after target onset (750ms duration)
+WINDOW_START_OFFSET_MS = 500
+WINDOW_END_OFFSET_MS = 1250
 MIN_FRAMES = 5
 
 
@@ -36,76 +40,55 @@ def find_targets_file(session_dir: Path) -> Path:
     return candidates[0]
 
 
-def infer_timestamp_field(frames):
+def detect_timebase(frames):
+    """
+    Detects whether to use epoch_ms or relative_sec based on frame fields.
+    Returns (mode, timestamp_key).
+    mode: 'epoch_ms' | 'relative_sec' | 'unknown'
+    """
     if not frames:
-        raise ValueError("No frames available for timestamp detection.")
-    keys = frames[0].keys()
-    for k in ["timestamp_ms", "timestamp", "timestamp_sec", "time_sec", "time_s", "t"]:
-        if k in keys:
-            return k
-    raise ValueError(f"No known timestamp field found. Keys: {sorted(keys)}")
+        return "unknown", None
+
+    # 1. Check for epoch ms (>= 1e9)
+    # Check a sample of frames to be sure
+    check_limit = min(len(frames), 200)
+    for i in range(check_limit):
+        val = frames[i].get("timestamp_ms")
+        if val is not None and isinstance(val, (int, float)) and val >= 1e9:
+            return "epoch_ms", "timestamp_ms"
+
+    # 2. Check for timestamp_sec
+    # Inspect keys of the first frame (or a few)
+    # We check if the key exists in the first frame
+    if "timestamp_sec" in frames[0]:
+         return "relative_sec", "timestamp_sec"
+
+    return "unknown", None
 
 
-def infer_timestamp_unit(values, key):
-    max_v = max(values)
-    key_is_ms = key.endswith("_ms")
-    key_is_sec = key.endswith("_sec") or "sec" in key or key.endswith("_s")
-
-    if max_v >= 1e12:
-        return "epoch_ms"
-    if max_v >= 1e9:
-        if key_is_ms:
-            return "epoch_ms"
-        return "epoch_sec"
-    if max_v >= 1e6:
-        if key_is_sec:
-            return "sec"
-        return "ms"
-    if key_is_ms:
-        return "ms"
-    return "sec"
-
-
-def normalize_timestamps(frames, key, created_at_ms):
-    raw_values = [f.get(key) for f in frames if f.get(key) is not None]
-    if not raw_values:
-        raise ValueError(f"No usable values for timestamp field '{key}'.")
-    unit = infer_timestamp_unit(raw_values, key)
-
-    def to_ms(v):
-        if unit == "epoch_ms":
-            return float(v)
-        if unit == "epoch_sec":
-            return float(v) * 1000.0
-        if unit == "ms":
-            return float(v) + (created_at_ms or 0)
-        return (created_at_ms or 0) + round(float(v) * 1000.0)
-
-    out = []
-    for f in frames:
-        v = f.get(key)
-        if v is None:
-            out.append(None)
-        else:
-            out.append(to_ms(v))
-    return out, unit
-
-
-def infer_gaze_fields(frames):
+def infer_eye_center_fields(frames):
+    """
+    Returns tuple: (left_x, left_y, right_x, right_y)
+    Prefers *_raw fields, falls back to standard fields.
+    """
     if not frames:
-        raise ValueError("No frames to infer gaze fields.")
+        raise ValueError("No frames to infer eye center fields.")
+    
     keys = frames[0].keys()
-    pairs = [
-        ("gaze_x", "gaze_y"),
-        ("gaze_x_px", "gaze_y_px"),
-        ("gaze_x_norm", "gaze_y_norm"),
-        ("gaze_x_normalized", "gaze_y_normalized"),
-        ("gaze_x_normed", "gaze_y_normed"),
-    ]
-    for gx, gy in pairs:
-        if gx in keys and gy in keys:
-            return gx, gy
-    raise ValueError(f"No gaze fields found. Keys: {sorted(keys)}")
+    
+    # Prefer raw values (unsmoothed)
+    if all(k in keys for k in ["left_center_x_raw", "left_center_y_raw", 
+                                "right_center_x_raw", "right_center_y_raw"]):
+        return ("left_center_x_raw", "left_center_y_raw", 
+                "right_center_x_raw", "right_center_y_raw")
+    
+    # Fallback to standard fields
+    if all(k in keys for k in ["left_center_x", "left_center_y", 
+                                "right_center_x", "right_center_y"]):
+        return ("left_center_x", "left_center_y", 
+                "right_center_x", "right_center_y")
+    
+    raise ValueError(f"No eye center fields found. Keys: {sorted(keys)}")
 
 
 def mean(vals):
@@ -118,41 +101,164 @@ def stddev(vals):
     return statistics.pstdev(vals)
 
 
-def build_pairs(frames, frame_ts, gaze_x_key, gaze_y_key, targets):
+def build_pairs(
+    frames, 
+    left_x_key, 
+    left_y_key, 
+    right_x_key, 
+    right_y_key, 
+    targets, 
+    timebase_mode, 
+    ts_key
+):
+    """
+    Build calibration pairs using separate left/right eye centers.
+    Handles 'epoch_ms' and 'relative_sec' logic for windowing.
+    """
     pairs = []
-    for t in targets:
+    
+    # Sort targets by timestamp_ms descending to find t0 (start time)
+    # User's logic: sort targets by timestamp_ms ascending
+    sorted_targets = sorted(targets, key=lambda x: x["timestamp_ms"])
+    if not sorted_targets:
+        return []
+        
+    t0_ms = sorted_targets[0]["timestamp_ms"]
+    
+    print(f"[calibration] Timebase Mode: {timebase_mode}")
+    
+    for t in sorted_targets:
         t_ms = t["timestamp_ms"]
-        # Window includes the last 500ms of gaze data up to and including the moment the target appeared.
-        window_start = t_ms - WINDOW_MS
-        window_end = t_ms
-
-        window = []
-        for f, ts in zip(frames, frame_ts):
+        
+        # Calculate window based on mode
+        window_start = 0.0
+        window_end = 0.0
+        target_info_str = ""
+        
+        if timebase_mode == "epoch_ms":
+            # Window in ms
+            window_start = t_ms + WINDOW_START_OFFSET_MS
+            window_end = t_ms + WINDOW_END_OFFSET_MS
+            target_info_str = f"T={t_ms:.1f} (epoch)"
+            
+        elif timebase_mode == "relative_sec":
+            # Window in seconds
+            target_rel_sec = (t_ms - t0_ms) / 1000.0
+            window_start = target_rel_sec + 0.500
+            window_end = target_rel_sec + 0.750
+            target_info_str = f"T_rel={target_rel_sec:.3f}s"
+        else:
+            # Unknown mode, skip
+            continue
+            
+        # Collect valid samples in window
+        left_x_samples = []
+        left_y_samples = []
+        right_x_samples = []
+        right_y_samples = []
+        
+        frames_in_window_count = 0
+        frames_after_filters_count = 0
+        
+        for f in frames:
+            ts = f.get(ts_key)
             if ts is None:
                 continue
+            
+            # Check window
             if ts < window_start or ts > window_end:
                 continue
-            gx = f.get(gaze_x_key)
-            gy = f.get(gaze_y_key)
-            if gx is None or gy is None:
+            
+            frames_in_window_count += 1
+            
+            # Filtering criteria
+            if not f.get("face_detected", False):
                 continue
-            window.append((float(gx), float(gy)))
-
-        n = len(window)
-        avg_x = mean([g[0] for g in window]) if window else None
-        avg_y = mean([g[1] for g in window]) if window else None
-        std_x = stddev([g[0] for g in window]) if window else None
-        std_y = stddev([g[1] for g in window]) if window else None
-
+            
+            # Check blink field (try both naming conventions)
+            is_blink = f.get("is_blink", f.get("blink", False))
+            if is_blink:
+                continue
+            
+            # Get confidence values
+            left_conf = f.get("left_confidence", 0.0)
+            right_conf = f.get("right_confidence", 0.0)
+            
+            # Require at least one eye with confidence >= 0.5
+            if left_conf < 0.5 and right_conf < 0.5:
+                continue
+            
+            frames_after_filters_count += 1
+            
+            # Extract eye centers (if available and confident)
+            if left_conf >= 0.5:
+                lx = f.get(left_x_key)
+                ly = f.get(left_y_key)
+                if lx is not None and ly is not None:
+                    left_x_samples.append(float(lx))
+                    left_y_samples.append(float(ly))
+            
+            if right_conf >= 0.5:
+                rx = f.get(right_x_key)
+                ry = f.get(right_y_key)
+                if rx is not None and ry is not None:
+                    right_x_samples.append(float(rx))
+                    right_y_samples.append(float(ry))
+        
+        # Compute statistics
+        n_frames = max(len(left_x_samples), len(right_x_samples))
+        
+        left_avg_x = mean(left_x_samples) if left_x_samples else None
+        left_avg_y = mean(left_y_samples) if left_y_samples else None
+        right_avg_x = mean(right_x_samples) if right_x_samples else None
+        right_avg_y = mean(right_y_samples) if right_y_samples else None
+        
+        left_std_x = stddev(left_x_samples) if left_x_samples else None
+        left_std_y = stddev(left_y_samples) if left_y_samples else None
+        right_std_x = stddev(right_x_samples) if right_x_samples else None
+        right_std_y = stddev(right_y_samples) if right_y_samples else None
+        
+        # Compute binocular gaze (for calibration fitting only)
+        gaze_avg_x = None
+        gaze_avg_y = None
+        if left_avg_x is not None and right_avg_x is not None:
+            gaze_avg_x = (left_avg_x + right_avg_x) / 2.0
+            gaze_avg_y = (left_avg_y + right_avg_y) / 2.0
+        
+        # Validity check
+        valid = n_frames >= MIN_FRAMES
+        invalid_reason = None
+        if not valid:
+            invalid_reason = f"Insufficient frames: {n_frames} < {MIN_FRAMES}"
+        
+        # Debug log as requested
+        # "target filename, target_rel_sec, window, frames_in_window, frames_after_filters"
+        print(
+            f"[window] {t['filename']} "
+            f"{target_info_str} "
+            f"win=[{window_start:.3f},{window_end:.3f}] "
+            f"in_win={frames_in_window_count} "
+            f"after_filt={frames_after_filters_count} "
+            f"valid={valid} ({n_frames} used)"
+        )
+        
         entry = {
             "target": t,
-            "gaze_avg": {"x": avg_x, "y": avg_y},
-            "window_ms": WINDOW_MS,
-            "n_frames": n,
-            "std": {"x": std_x, "y": std_y},
-            "valid": n >= MIN_FRAMES,
+            "window_start_ms": window_start if timebase_mode == "epoch_ms" else None, # preserve ms if possible, else might be sec
+            "window_end_ms": window_end if timebase_mode == "epoch_ms" else None,
+            "window_start_val": window_start,
+            "window_end_val": window_end,
+            "n_frames": n_frames,
+            "left_avg": {"x": left_avg_x, "y": left_avg_y},
+            "right_avg": {"x": right_avg_x, "y": right_avg_y},
+            "left_std": {"x": left_std_x, "y": left_std_y},
+            "right_std": {"x": right_std_x, "y": right_std_y},
+            "gaze_avg": {"x": gaze_avg_x, "y": gaze_avg_y},  # For model fitting
+            "valid": valid,
+            "invalid_reason": invalid_reason,
         }
         pairs.append(entry)
+    
     return pairs
 
 
@@ -179,40 +285,50 @@ def predict_affine(coeffs_x, coeffs_y, gx, gy):
 def build_report(pairs, coeffs_x, coeffs_y):
     per_target = []
     errors = []
+    
     for p in pairs:
         tgt = p["target"]
+        
+        base_entry = {
+            "filename": tgt["filename"],
+            "x": tgt["x"],
+            "y": tgt["y"],
+            "window_start_ms": p["window_start_ms"],
+            "window_end_ms": p["window_end_ms"],
+            "n_frames": p["n_frames"],
+            "left_avg_x": p["left_avg"]["x"],
+            "left_avg_y": p["left_avg"]["y"],
+            "right_avg_x": p["right_avg"]["x"],
+            "right_avg_y": p["right_avg"]["y"],
+            "left_std_x": p["left_std"]["x"],
+            "left_std_y": p["left_std"]["y"],
+            "right_std_x": p["right_std"]["x"],
+            "right_std_y": p["right_std"]["y"],
+            "valid": p["valid"],
+        }
+        
         if not p.get("valid"):
-            per_target.append(
-                {
-                    "filename": tgt["filename"],
-                    "x": tgt["x"],
-                    "y": tgt["y"],
-                    "n_frames": p["n_frames"],
-                    "valid": False,
-                }
-            )
+            base_entry["invalid_reason"] = p.get("invalid_reason", "Unknown")
+            per_target.append(base_entry)
             continue
-
+        
+        # Compute error using gaze_avg (binocular mean)
         gx = p["gaze_avg"]["x"]
         gy = p["gaze_avg"]["y"]
-        sx_hat, sy_hat = predict_affine(coeffs_x, coeffs_y, gx, gy)
-        dx = sx_hat - tgt["x"]
-        dy = sy_hat - tgt["y"]
-        err = math.hypot(dx, dy)
-        errors.append(err)
-        per_target.append(
-            {
-                "filename": tgt["filename"],
-                "x": tgt["x"],
-                "y": tgt["y"],
-                "n_frames": p["n_frames"],
-                "valid": True,
-                "dx": dx,
-                "dy": dy,
-                "error_px": err,
-            }
-        )
-
+        
+        if gx is not None and gy is not None:
+            sx_hat, sy_hat = predict_affine(coeffs_x, coeffs_y, gx, gy)
+            dx = sx_hat - tgt["x"]
+            dy = sy_hat - tgt["y"]
+            err = math.hypot(dx, dy)
+            errors.append(err)
+            
+            base_entry["dx"] = dx
+            base_entry["dy"] = dy
+            base_entry["error_px"] = err
+        
+        per_target.append(base_entry)
+    
     mean_err = mean(errors) if errors else None
     median_err = statistics.median(errors) if errors else None
     rmse = math.sqrt(mean([e * e for e in errors])) if errors else None
@@ -237,8 +353,21 @@ def main():
     if not session_dir.exists():
         raise FileNotFoundError(f"Session folder does not exist: {session_dir}")
 
+    # Check if we're in parent folder with nested session_* subfolder
+    # (calibration_targets.json is in parent, but recording.mp4 is in nested session_*)
+    nested_sessions = list(session_dir.glob("session_*"))
+    if nested_sessions:
+        # Use the most recent session folder as the actual output location
+        nested_sessions.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        actual_session_dir = nested_sessions[0]
+        print(f"[calibration] detected nested session: {actual_session_dir.name}")
+        print(f"[calibration] targets from: {session_dir.name}")
+        print(f"[calibration] reports to: {actual_session_dir.name}")
+    else:
+        actual_session_dir = session_dir
+
     targets_path = find_targets_file(session_dir)
-    tracking_path = find_tracking_file(session_dir)
+    tracking_path = find_tracking_file(actual_session_dir)
 
     targets_data = load_json(targets_path)
     tracking_data = load_json(tracking_path)
@@ -251,35 +380,32 @@ def main():
     if not isinstance(frames, list):
         raise ValueError("Tracking data format not recognized; expected list or dict with 'frames'.")
 
-    ts_key = infer_timestamp_field(frames)
-    created_at_ms = targets_data.get("created_at_ms")
-    frame_ts, ts_unit = normalize_timestamps(frames, ts_key, created_at_ms)
+    ts_mode, ts_key = detect_timebase(frames)
+    if ts_mode == "unknown":
+        raise ValueError("Could not detect timebase (checked 'timestamp_ms' and 'timestamp_sec').")
 
-    gaze_x_key, gaze_y_key = infer_gaze_fields(frames)
+    left_x_key, left_y_key, right_x_key, right_y_key = infer_eye_center_fields(frames)
+    print(f"[calibration] using fields: L=({left_x_key},{left_y_key}) R=({right_x_key},{right_y_key})")
+    print(f"[calibration] using timestamp mode: {ts_mode} (key={ts_key})")
 
-    first_frame_ts = next((ts for ts in frame_ts if ts is not None), None)
-    first_target_ts = targets[0].get("timestamp_ms")
-    delta_ms = (first_frame_ts - first_target_ts) if (first_frame_ts is not None and first_target_ts is not None) else None
-
-    pairs = build_pairs(frames, frame_ts, gaze_x_key, gaze_y_key, targets)
+    pairs = build_pairs(frames, left_x_key, left_y_key, right_x_key, right_y_key, targets, ts_mode, ts_key)
 
     valid_counts = [p["n_frames"] for p in pairs if p["n_frames"] is not None]
-    print(f"[calibration] timestamp_field={ts_key} unit={ts_unit} created_at_ms={created_at_ms}")
-    print(f"[calibration] first_tracking_ts={first_frame_ts} first_target_ts={first_target_ts} delta_ms={delta_ms}")
-    print(f"[calibration] targets={len(pairs)} valid={len([p for p in pairs if p['valid']])}")
+    print(f"[calibration] targets={len(pairs)} valid={len([p for p in pairs if p['valid']])} ")
     if valid_counts:
         print(f"[calibration] frames/window min={min(valid_counts)} max={max(valid_counts)}")
 
-    pairs_path = session_dir / "calibration_pairs.json"
-    dataset_path = session_dir / "calibration_dataset.csv"
-    model_path = session_dir / "calibration_model.json"
-    report_path = session_dir / "calibration_report.json"
+    # Write outputs to actual_session_dir (where recording.mp4 is)
+    pairs_path = actual_session_dir / "calibration_pairs.json"
+    dataset_path = actual_session_dir / "calibration_dataset.csv"
+    model_path = actual_session_dir / "calibration_model.json"
+    report_path = actual_session_dir / "calibration_report.json"
 
     pairs_payload = {
         "session_id": targets_data.get("session_id"),
         "timestamp_field": ts_key,
-        "timestamp_unit": ts_unit,
-        "window_ms": WINDOW_MS,
+        "timestamp_unit": ts_mode,
+        "window_ms": WINDOW_END_OFFSET_MS - WINDOW_START_OFFSET_MS if ts_mode == "epoch_ms" else 250, # approx 250ms for rel mode
         "min_frames": MIN_FRAMES,
         "pairs": pairs,
     }
@@ -294,22 +420,32 @@ def main():
                 "target_filename",
                 "target_x",
                 "target_y",
-                "avg_gaze_x",
-                "avg_gaze_y",
+                "left_avg_x",
+                "left_avg_y",
+                "right_avg_x",
+                "right_avg_y",
+                "gaze_avg_x",
+                "gaze_avg_y",
                 "target_timestamp_ms",
                 "n_frames",
             ]
         )
         for p in valid_pairs:
             tgt = p["target"]
-            avg = p["gaze_avg"]
+            left_avg = p["left_avg"]
+            right_avg = p["right_avg"]
+            gaze_avg = p["gaze_avg"]
             writer.writerow(
                 [
                     tgt.get("filename"),
                     tgt.get("x"),
                     tgt.get("y"),
-                    avg.get("x"),
-                    avg.get("y"),
+                    left_avg.get("x"),
+                    left_avg.get("y"),
+                    right_avg.get("x"),
+                    right_avg.get("y"),
+                    gaze_avg.get("x"),
+                    gaze_avg.get("y"),
                     tgt.get("timestamp_ms"),
                     p.get("n_frames"),
                 ]
@@ -333,8 +469,19 @@ def main():
                     "filename": p["target"]["filename"],
                     "x": p["target"]["x"],
                     "y": p["target"]["y"],
+                    "window_start_ms": p["window_start_ms"],
+                    "window_end_ms": p["window_end_ms"],
                     "n_frames": p["n_frames"],
+                    "left_avg_x": p["left_avg"]["x"],
+                    "left_avg_y": p["left_avg"]["y"],
+                    "right_avg_x": p["right_avg"]["x"],
+                    "right_avg_y": p["right_avg"]["y"],
+                    "left_std_x": p["left_std"]["x"],
+                    "left_std_y": p["left_std"]["y"],
+                    "right_std_x": p["right_std"]["x"],
+                    "right_std_y": p["right_std"]["y"],
                     "valid": p["valid"],
+                    "invalid_reason": p.get("invalid_reason"),
                 }
                 for p in pairs
             ],
@@ -350,7 +497,7 @@ def main():
 
     model_payload = {
         "model_type": "affine_2d",
-        "window_ms": WINDOW_MS,
+        "window_ms": WINDOW_END_OFFSET_MS - WINDOW_START_OFFSET_MS,
         "input": "gaze_avg_xy",
         "output": "screen_xy_pixels",
         "coeffs": {"sx": coeffs_x, "sy": coeffs_y},

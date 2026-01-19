@@ -313,6 +313,96 @@ ipcMain.handle("head_position:stop", async () => {
   return { ok: true, message: "stopped" };
 });
 
+/* -------------------- Live Gaze Stream IPC -------------------- */
+
+let gazeStreamProc: ChildProcessWithoutNullStreams | null = null;
+let gazeStreamBuffer = "";
+
+function stopGazeStreamProcess() {
+  if (gazeStreamProc && !gazeStreamProc.killed) {
+    try {
+      gazeStreamProc.kill();
+    } catch {
+      // ignore
+    }
+  }
+  gazeStreamProc = null;
+  gazeStreamBuffer = "";
+}
+
+function handleGazeStreamStdout(chunk: Buffer) {
+  gazeStreamBuffer += chunk.toString();
+  const lines = gazeStreamBuffer.split(/\r?\n/);
+  gazeStreamBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const payload = JSON.parse(trimmed);
+      if (payload?.type === "gaze" || payload?.type === "ready") {
+        win?.webContents.send("gaze_stream:update", payload);
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+}
+
+ipcMain.handle(
+  "gaze_stream:start",
+  async (_e, opts: { cam?: number; fps?: number; script?: string } = {}) => {
+    if (gazeStreamProc && !gazeStreamProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = opts.script
+      ? path.isAbsolute(opts.script)
+        ? opts.script
+        : path.join(process.env.APP_ROOT!, opts.script)
+      : path.join(process.env.APP_ROOT!, "tracker", "live_gaze_stream.py");
+
+    const args = [scriptPath];
+    if (typeof opts.cam === "number") {
+      args.push("--cam", String(opts.cam));
+    }
+    if (typeof opts.fps === "number") {
+      args.push("--fps", String(opts.fps));
+    }
+
+    try {
+      gazeStreamProc = spawn(python, args, {
+        cwd: process.env.APP_ROOT!,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+        },
+      });
+
+      gazeStreamProc.stdout.on("data", handleGazeStreamStdout);
+      gazeStreamProc.stderr.on("data", (buf) => {
+        const msg = buf.toString();
+        if (msg.trim()) {
+          console.warn("[gaze_stream]", msg.trim());
+        }
+      });
+      gazeStreamProc.on("close", () => {
+        gazeStreamProc = null;
+        gazeStreamBuffer = "";
+      });
+
+      return { ok: true, message: "started" };
+    } catch (err: any) {
+      gazeStreamProc = null;
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle("gaze_stream:stop", async () => {
+  stopGazeStreamProcess();
+  return { ok: true, message: "stopped" };
+});
 
 /* -------------------- Annotation IPC -------------------- */
 
@@ -530,6 +620,7 @@ if (!gotLock) {
 
   app.on("before-quit", () => {
     stopHeadPositionProcess();
+    stopGazeStreamProcess();
   });
 
   app.on("window-all-closed", () => {
