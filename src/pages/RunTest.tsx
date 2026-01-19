@@ -30,6 +30,12 @@ type ProtocolManifest = Record<string, Protocol>;
 
 type SlideMark = { slide: number; t: number }; // ms since session start
 type CalibrationTarget = { filename: string; x: number; y: number; timestamp_ms: number };
+type SlideFilenameMark = {
+  filename: string;
+  t_ms: number;
+  slide_index: number;
+  protocol_key: string;
+};
 type SessionExport = {
   id: string;
   startedAt: string;
@@ -102,6 +108,8 @@ export default function RunTest() {
   const advanceTimer = useRef<number | null>(null);
   const calibrationTargetsRef = useRef<CalibrationTarget[]>([]);
   const calibrationCreatedAtRef = useRef<number | null>(null);
+  const slideMarksRef = useRef<SlideFilenameMark[]>([]);
+  const slideMarksCreatedAtRef = useRef<number | null>(null);
   const lastLoggedSlideRef = useRef<string | null>(null);
   const [headStatus, setHeadStatus] = useState<HeadPositionStatus>("NOT_DETECTED");
   const [headInstruction, setHeadInstruction] = useState<string>("Face not detected");
@@ -347,12 +355,31 @@ export default function RunTest() {
 
   useEffect(() => {
     if (!current) return;
+    if (!running || !sessionId) return;
     if (lastLoggedSlideRef.current === current) return;
     lastLoggedSlideRef.current = current;
 
-    if (!running || !sessionId || key !== "calibration") return;
-
     const filename = getFilename(current);
+    const nowMs = Math.max(0, Math.round(performance.now() - t0.current));
+    if (!slideMarksCreatedAtRef.current) {
+      slideMarksCreatedAtRef.current = Date.now();
+    }
+
+    slideMarksRef.current.push({
+      filename,
+      t_ms: nowMs,
+      slide_index: idx,
+      protocol_key: key,
+    });
+
+    const slidePayload = {
+      session_id: sessionId,
+      created_at_ms: slideMarksCreatedAtRef.current,
+      marks: slideMarksRef.current,
+    };
+    void writeSessionJson(`recordings/${sessionId}/slide_marks.json`, slidePayload);
+
+    if (key !== "calibration") return;
     if (filename === "center.png") return;
 
     const match = /^(\d+)-(\d+)\.png$/.exec(filename);
@@ -376,7 +403,7 @@ export default function RunTest() {
       targets: calibrationTargetsRef.current,
     };
     void writeSessionJson(`recordings/${sessionId}/calibration_targets.json`, payload);
-  }, [current, running, sessionId, key, getFilename, writeSessionJson]);
+  }, [current, running, sessionId, key, getFilename, writeSessionJson, idx]);
 
   // Handle protocol switching / auto-stop
   useEffect(() => {
@@ -486,6 +513,8 @@ export default function RunTest() {
     const sid = newSessionId();
     calibrationTargetsRef.current = [];
     calibrationCreatedAtRef.current = Date.now();
+    slideMarksRef.current = [];
+    slideMarksCreatedAtRef.current = Date.now();
     lastLoggedSlideRef.current = null;
     // const outDir = `recordings/${sid}`; // Unused variable removed
     // Relative to app root, or absolute?
@@ -643,6 +672,8 @@ export default function RunTest() {
     setSlidesReady(false);
     calibrationTargetsRef.current = [];
     calibrationCreatedAtRef.current = null;
+    slideMarksRef.current = [];
+    slideMarksCreatedAtRef.current = null;
     lastLoggedSlideRef.current = null;
   }
 

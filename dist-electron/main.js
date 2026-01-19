@@ -71,6 +71,45 @@ function parseSessionTimestamp(name) {
   const parsed = /* @__PURE__ */ new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`);
   return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
 }
+function findLatestTrackingDataFile(rootDir) {
+  if (!fs.existsSync(rootDir)) return null;
+  let latestPath = null;
+  let latestMtime = 0;
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith("_tracking_data.json")) {
+        const mtimeMs = fs.statSync(fullPath).mtimeMs;
+        if (!latestPath || mtimeMs > latestMtime) {
+          latestPath = fullPath;
+          latestMtime = mtimeMs;
+        }
+      }
+    }
+  }
+  return latestPath;
+}
+function findLatestNestedSessionDir(sessionPath) {
+  if (!fs.existsSync(sessionPath)) return null;
+  const entries = fs.readdirSync(sessionPath, { withFileTypes: true });
+  const nested = entries.filter((entry) => entry.isDirectory() && entry.name.startsWith("session_")).map((entry) => path.join(sessionPath, entry.name));
+  if (!nested.length) return null;
+  nested.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return nested[0];
+}
+function resolveSessionFile(sessionPath, filename) {
+  const direct = path.join(sessionPath, filename);
+  if (fs.existsSync(direct)) return direct;
+  const nested = findLatestNestedSessionDir(sessionPath);
+  if (!nested) return null;
+  const nestedFile = path.join(nested, filename);
+  return fs.existsSync(nestedFile) ? nestedFile : null;
+}
 function createWindow() {
   const iconPath = path.join(
     process.env.VITE_PUBLIC,
@@ -368,9 +407,9 @@ ipcMain.handle("recordings:listSessions", async (_e, { limit = 20 } = {}) => {
     const stat = fs.statSync(dirPath);
     const mtimeMs = stat.mtimeMs;
     const sortKey = mtimeMs || parseSessionTimestamp(name);
-    const reportPath = path.join(dirPath, "calibration_report.json");
-    const pairsPath = path.join(dirPath, "calibration_pairs.json");
-    const hasCalibration = fs.existsSync(reportPath) && fs.existsSync(pairsPath);
+    const reportPath = resolveSessionFile(dirPath, "calibration_report.json");
+    const pairsPath = resolveSessionFile(dirPath, "calibration_pairs.json");
+    const hasCalibration = !!reportPath && !!pairsPath;
     return { sessionId: name, mtimeMs, sortKey, hasCalibration };
   });
   return sessions.sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0)).slice(0, limit).map(({ sortKey: _sortKey, ...rest }) => rest);
@@ -382,18 +421,41 @@ ipcMain.handle(
       const recDir = path.join(process.env.APP_ROOT, "recordings");
       const safeSession = safePathSegment(sessionId);
       const safeFile = safePathSegment(filename);
-      const filePath = path.join(recDir, safeSession, safeFile);
+      const sessionPath = path.join(recDir, safeSession);
+      const filePath = resolveSessionFile(sessionPath, safeFile);
+      if (!filePath) {
+        return { ok: false, error: "File not found" };
+      }
       const resolved = path.resolve(filePath);
       const resolvedRoot = path.resolve(recDir);
       if (!resolved.startsWith(resolvedRoot + path.sep)) {
         return { ok: false, error: "Invalid path" };
       }
-      if (!fs.existsSync(resolved)) {
-        return { ok: false, error: "File not found" };
-      }
       const raw = fs.readFileSync(resolved, "utf-8");
       const data = JSON.parse(raw);
       return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
+    }
+  }
+);
+ipcMain.handle(
+  "recordings:readTracking",
+  async (_e, { sessionId }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, error: "Session folder not found" };
+      }
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, error: "Tracking data not found" };
+      }
+      const raw = fs.readFileSync(trackingPath, "utf-8");
+      const data = JSON.parse(raw);
+      return { ok: true, data, filename: path.basename(trackingPath) };
     } catch (e) {
       return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
     }

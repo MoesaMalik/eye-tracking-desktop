@@ -95,6 +95,10 @@ def mean(vals):
     return sum(vals) / len(vals) if vals else None
 
 
+def median(vals):
+    return statistics.median(vals) if vals else None
+
+
 def stddev(vals):
     if len(vals) < 2:
         return 0.0
@@ -144,8 +148,8 @@ def build_pairs(
         elif timebase_mode == "relative_sec":
             # Window in seconds
             target_rel_sec = (t_ms - t0_ms) / 1000.0
-            window_start = target_rel_sec + 0.500
-            window_end = target_rel_sec + 0.750
+            window_start = target_rel_sec + (WINDOW_START_OFFSET_MS / 1000.0)
+            window_end = target_rel_sec + (WINDOW_END_OFFSET_MS / 1000.0)
             target_info_str = f"T_rel={target_rel_sec:.3f}s"
         else:
             # Unknown mode, skip
@@ -158,7 +162,7 @@ def build_pairs(
         right_y_samples = []
         
         frames_in_window_count = 0
-        frames_after_filters_count = 0
+        valid_frames_used = 0
         
         for f in frames:
             ts = f.get(ts_key)
@@ -171,47 +175,41 @@ def build_pairs(
             
             frames_in_window_count += 1
             
-            # Filtering criteria
+            # Filtering criteria (calibration mode: relaxed)
             if not f.get("face_detected", False):
                 continue
             
-            # Check blink field (try both naming conventions)
-            is_blink = f.get("is_blink", f.get("blink", False))
-            if is_blink:
+            lx = f.get(left_x_key)
+            ly = f.get(left_y_key)
+            rx = f.get(right_x_key)
+            ry = f.get(right_y_key)
+
+            left_valid = lx is not None and ly is not None
+            right_valid = rx is not None and ry is not None
+
+            # Require at least one valid eye sample
+            if not left_valid and not right_valid:
                 continue
-            
-            # Get confidence values
-            left_conf = f.get("left_confidence", 0.0)
-            right_conf = f.get("right_confidence", 0.0)
-            
-            # Require at least one eye with confidence >= 0.5
-            if left_conf < 0.5 and right_conf < 0.5:
-                continue
-            
-            frames_after_filters_count += 1
-            
-            # Extract eye centers (if available and confident)
-            if left_conf >= 0.5:
-                lx = f.get(left_x_key)
-                ly = f.get(left_y_key)
-                if lx is not None and ly is not None:
-                    left_x_samples.append(float(lx))
-                    left_y_samples.append(float(ly))
-            
-            if right_conf >= 0.5:
-                rx = f.get(right_x_key)
-                ry = f.get(right_y_key)
-                if rx is not None and ry is not None:
-                    right_x_samples.append(float(rx))
-                    right_y_samples.append(float(ry))
+
+            valid_frames_used += 1
+
+            if left_valid:
+                left_x_samples.append(float(lx))
+                left_y_samples.append(float(ly))
+
+            if right_valid:
+                right_x_samples.append(float(rx))
+                right_y_samples.append(float(ry))
         
         # Compute statistics
-        n_frames = max(len(left_x_samples), len(right_x_samples))
+        left_count = len(left_x_samples)
+        right_count = len(right_x_samples)
+        n_frames = valid_frames_used
         
-        left_avg_x = mean(left_x_samples) if left_x_samples else None
-        left_avg_y = mean(left_y_samples) if left_y_samples else None
-        right_avg_x = mean(right_x_samples) if right_x_samples else None
-        right_avg_y = mean(right_y_samples) if right_y_samples else None
+        left_avg_x = median(left_x_samples) if left_x_samples else None
+        left_avg_y = median(left_y_samples) if left_y_samples else None
+        right_avg_x = median(right_x_samples) if right_x_samples else None
+        right_avg_y = median(right_y_samples) if right_y_samples else None
         
         left_std_x = stddev(left_x_samples) if left_x_samples else None
         left_std_y = stddev(left_y_samples) if left_y_samples else None
@@ -219,17 +217,25 @@ def build_pairs(
         right_std_y = stddev(right_y_samples) if right_y_samples else None
         
         # Compute binocular gaze (for calibration fitting only)
-        gaze_avg_x = None
-        gaze_avg_y = None
+        eye_avg_x = None
+        eye_avg_y = None
         if left_avg_x is not None and right_avg_x is not None:
-            gaze_avg_x = (left_avg_x + right_avg_x) / 2.0
-            gaze_avg_y = (left_avg_y + right_avg_y) / 2.0
+            eye_avg_x = (left_avg_x + right_avg_x) / 2.0
+            eye_avg_y = (left_avg_y + right_avg_y) / 2.0
+        elif left_avg_x is not None:
+            eye_avg_x = left_avg_x
+            eye_avg_y = left_avg_y
+        elif right_avg_x is not None:
+            eye_avg_x = right_avg_x
+            eye_avg_y = right_avg_y
         
         # Validity check
-        valid = n_frames >= MIN_FRAMES
+        valid = n_frames >= MIN_FRAMES and eye_avg_x is not None and eye_avg_y is not None
         invalid_reason = None
         if not valid:
-            invalid_reason = f"Insufficient frames: {n_frames} < {MIN_FRAMES}"
+            invalid_reason = (
+                f"Insufficient valid frames after calibration filtering: {n_frames} < {MIN_FRAMES}"
+            )
         
         # Debug log as requested
         # "target filename, target_rel_sec, window, frames_in_window, frames_after_filters"
@@ -238,7 +244,8 @@ def build_pairs(
             f"{target_info_str} "
             f"win=[{window_start:.3f},{window_end:.3f}] "
             f"in_win={frames_in_window_count} "
-            f"after_filt={frames_after_filters_count} "
+            f"valid_frames={valid_frames_used} "
+            f"L={left_count} R={right_count} "
             f"valid={valid} ({n_frames} used)"
         )
         
@@ -249,11 +256,16 @@ def build_pairs(
             "window_start_val": window_start,
             "window_end_val": window_end,
             "n_frames": n_frames,
+            "raw_frames_in_window": frames_in_window_count,
+            "valid_frames_used": valid_frames_used,
+            "left_count": left_count,
+            "right_count": right_count,
             "left_avg": {"x": left_avg_x, "y": left_avg_y},
             "right_avg": {"x": right_avg_x, "y": right_avg_y},
             "left_std": {"x": left_std_x, "y": left_std_y},
             "right_std": {"x": right_std_x, "y": right_std_y},
-            "gaze_avg": {"x": gaze_avg_x, "y": gaze_avg_y},  # For model fitting
+            "eye_avg": {"x": eye_avg_x, "y": eye_avg_y},
+            "gaze_avg": {"x": eye_avg_x, "y": eye_avg_y},  # For model fitting
             "valid": valid,
             "invalid_reason": invalid_reason,
         }
@@ -296,10 +308,16 @@ def build_report(pairs, coeffs_x, coeffs_y):
             "window_start_ms": p["window_start_ms"],
             "window_end_ms": p["window_end_ms"],
             "n_frames": p["n_frames"],
+            "raw_frames_in_window": p.get("raw_frames_in_window"),
+            "valid_frames_used": p.get("valid_frames_used"),
+            "left_count": p.get("left_count"),
+            "right_count": p.get("right_count"),
             "left_avg_x": p["left_avg"]["x"],
             "left_avg_y": p["left_avg"]["y"],
             "right_avg_x": p["right_avg"]["x"],
             "right_avg_y": p["right_avg"]["y"],
+            "eye_avg_x": p.get("eye_avg", {}).get("x"),
+            "eye_avg_y": p.get("eye_avg", {}).get("y"),
             "left_std_x": p["left_std"]["x"],
             "left_std_y": p["left_std"]["y"],
             "right_std_x": p["right_std"]["x"],
@@ -312,9 +330,10 @@ def build_report(pairs, coeffs_x, coeffs_y):
             per_target.append(base_entry)
             continue
         
-        # Compute error using gaze_avg (binocular mean)
-        gx = p["gaze_avg"]["x"]
-        gy = p["gaze_avg"]["y"]
+        # Compute error using eye_avg (fallback to gaze_avg for legacy)
+        gaze = p.get("eye_avg") or p.get("gaze_avg") or {}
+        gx = gaze.get("x")
+        gy = gaze.get("y")
         
         if gx is not None and gy is not None:
             sx_hat, sy_hat = predict_affine(coeffs_x, coeffs_y, gx, gy)
@@ -405,7 +424,7 @@ def main():
         "session_id": targets_data.get("session_id"),
         "timestamp_field": ts_key,
         "timestamp_unit": ts_mode,
-        "window_ms": WINDOW_END_OFFSET_MS - WINDOW_START_OFFSET_MS if ts_mode == "epoch_ms" else 250, # approx 250ms for rel mode
+        "window_ms": WINDOW_END_OFFSET_MS - WINDOW_START_OFFSET_MS,
         "min_frames": MIN_FRAMES,
         "pairs": pairs,
     }
@@ -472,10 +491,16 @@ def main():
                     "window_start_ms": p["window_start_ms"],
                     "window_end_ms": p["window_end_ms"],
                     "n_frames": p["n_frames"],
+                    "raw_frames_in_window": p.get("raw_frames_in_window"),
+                    "valid_frames_used": p.get("valid_frames_used"),
+                    "left_count": p.get("left_count"),
+                    "right_count": p.get("right_count"),
                     "left_avg_x": p["left_avg"]["x"],
                     "left_avg_y": p["left_avg"]["y"],
                     "right_avg_x": p["right_avg"]["x"],
                     "right_avg_y": p["right_avg"]["y"],
+                    "eye_avg_x": p.get("eye_avg", {}).get("x"),
+                    "eye_avg_y": p.get("eye_avg", {}).get("y"),
                     "left_std_x": p["left_std"]["x"],
                     "left_std_y": p["left_std"]["y"],
                     "right_std_x": p["right_std"]["x"],

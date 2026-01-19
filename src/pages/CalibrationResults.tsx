@@ -10,6 +10,9 @@ import {
   Tooltip,
   BarChart,
   Bar,
+  Legend,
+  LineChart,
+  Line,
 } from "recharts";
 
 type SessionEntry = {
@@ -25,16 +28,38 @@ type CalibrationPair = {
     y: number;
     timestamp_ms: number;
   };
-  gaze_avg: {
+  eye_avg?: {
+    x: number | null;
+    y: number | null;
+  };
+  gaze_avg?: {
     x: number | null;
     y: number | null;
   };
   n_frames: number;
+  valid_frames_used?: number;
+  raw_frames_in_window?: number;
+  left_count?: number;
+  right_count?: number;
+  invalid_reason?: string | null;
   valid: boolean;
 };
 
 type CalibrationPairsPayload = {
   pairs: CalibrationPair[];
+};
+
+type TrackingFrame = {
+  timestamp_sec?: number;
+  timestamp_ms?: number;
+  gaze_x?: number;
+  gaze_y?: number;
+  gaze_x_raw?: number;
+  gaze_y_raw?: number;
+};
+
+type TrackingPayload = {
+  frames?: TrackingFrame[];
 };
 
 type CalibrationReportPayload = {
@@ -76,6 +101,18 @@ function formatNumber(value: number | null | undefined, digits = 2) {
   return value.toFixed(digits);
 }
 
+const getGazePoint = (p: CalibrationPair) => {
+  const eye = p.eye_avg ?? p.gaze_avg;
+  return { x: eye?.x ?? null, y: eye?.y ?? null };
+};
+
+const toTrackingFrames = (payload: TrackingPayload | TrackingFrame[] | null) => {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.frames)) return payload.frames;
+  return [];
+};
+
 export default function CalibrationResults() {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [selectedSession, setSelectedSession] = useState<string>("");
@@ -87,6 +124,8 @@ export default function CalibrationResults() {
   const [report, setReport] = useState<CalibrationReportPayload | null>(null);
   const [pairsPayload, setPairsPayload] = useState<CalibrationPairsPayload | null>(null);
   const [model, setModel] = useState<CalibrationModelPayload | null>(null);
+  const [tracking, setTracking] = useState<TrackingPayload | TrackingFrame[] | null>(null);
+  const [trackingError, setTrackingError] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [runOutput, setRunOutput] = useState<string>("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -122,6 +161,8 @@ export default function CalibrationResults() {
     setReport(null);
     setPairsPayload(null);
     setModel(null);
+    setTracking(null);
+    setTrackingError(null);
     setRunStatus("idle");
     setRunOutput("");
 
@@ -140,8 +181,11 @@ export default function CalibrationResults() {
         sessionId: selectedSession,
         filename: "calibration_model.json",
       }),
+      invokeIpc("recordings:readTracking", {
+        sessionId: selectedSession,
+      }),
     ])
-      .then(([reportRes, pairsRes, modelRes]) => {
+      .then(([reportRes, pairsRes, modelRes, trackingRes]) => {
         const missing: string[] = [];
         if (!reportRes?.ok) missing.push(required[0]);
         if (!pairsRes?.ok) missing.push(required[1]);
@@ -150,6 +194,10 @@ export default function CalibrationResults() {
         if (reportRes?.ok) setReport(reportRes.data);
         if (pairsRes?.ok) setPairsPayload(pairsRes.data);
         if (modelRes?.ok) setModel(modelRes.data);
+        if (trackingRes?.ok) setTracking(trackingRes.data);
+        if (!trackingRes?.ok && trackingRes?.error) {
+          setTrackingError(trackingRes.error);
+        }
         if (reportRes?.ok || pairsRes?.ok) {
           console.log("[CalibrationResults] loaded", {
             sessionId: selectedSession,
@@ -168,7 +216,11 @@ export default function CalibrationResults() {
   const validPairs = useMemo(
     () =>
       pairs.filter(
-        (p) => p.valid && p.gaze_avg?.x !== null && p.gaze_avg?.y !== null
+        (p) => {
+          if (!p.valid) return false;
+          const gaze = getGazePoint(p);
+          return gaze.x !== null && gaze.y !== null;
+        }
       ),
     [pairs]
   );
@@ -196,7 +248,8 @@ export default function CalibrationResults() {
     }
     if (!hasModel) return [];
     return validPairs.map((p) => {
-      const pred = predict(p.gaze_avg.x!, p.gaze_avg.y!);
+      const gaze = getGazePoint(p);
+      const pred = predict(gaze.x!, gaze.y!);
       const dx = pred.x - p.target.x;
       const dy = pred.y - p.target.y;
       return { name: p.target.filename, error: Math.hypot(dx, dy) };
@@ -214,25 +267,77 @@ export default function CalibrationResults() {
     rmse: report?.rmse_px ?? null,
   };
 
-  const maxX = Math.max(0, ...pairs.map((p) => p.target.x || 0));
-  const maxY = Math.max(0, ...pairs.map((p) => p.target.y || 0));
-
   const scatterTargets = validPairs.map((p) => ({
     x: p.target.x,
     y: p.target.y,
     name: p.target.filename,
   }));
 
+  const scatterMeasured = validPairs.map((p) => {
+    const gaze = getGazePoint(p);
+    return { x: gaze.x!, y: gaze.y!, name: p.target.filename };
+  });
+
   const scatterPredicted = hasModel
     ? validPairs.map((p) => {
-      const pred = predict(p.gaze_avg.x!, p.gaze_avg.y!);
+      const gaze = getGazePoint(p);
+      const pred = predict(gaze.x!, gaze.y!);
       return { x: pred.x, y: pred.y, name: p.target.filename };
     })
     : [];
 
+  const trackingSeries = useMemo(() => {
+    const frames = toTrackingFrames(tracking);
+    if (!frames.length) return [];
+    const hasSec = frames.some((f) => typeof f.timestamp_sec === "number");
+    const timeKey = hasSec ? "timestamp_sec" : "timestamp_ms";
+    let t0 = 0;
+    if (timeKey === "timestamp_ms") {
+      const first = frames.find((f) => typeof f.timestamp_ms === "number");
+      t0 = typeof first?.timestamp_ms === "number" ? first.timestamp_ms : 0;
+    }
+    return frames
+      .map((f) => {
+        const t = timeKey === "timestamp_sec"
+          ? f.timestamp_sec
+          : typeof f.timestamp_ms === "number"
+            ? (f.timestamp_ms - t0) / 1000
+            : null;
+        const gx = typeof f.gaze_x_raw === "number"
+          ? f.gaze_x_raw
+          : typeof f.gaze_x === "number"
+            ? f.gaze_x
+            : null;
+        const gy = typeof f.gaze_y_raw === "number"
+          ? f.gaze_y_raw
+          : typeof f.gaze_y === "number"
+            ? f.gaze_y
+            : null;
+        if (typeof t !== "number" || (gx === null && gy === null)) return null;
+        return { t, gazeX: gx, gazeY: gy };
+      })
+      .filter((p): p is { t: number; gazeX: number | null; gazeY: number | null } => p !== null);
+  }, [tracking]);
+
+  const maxX = Math.max(
+    0,
+    ...scatterTargets.map((p) => p.x || 0),
+    ...scatterMeasured.map((p) => p.x || 0),
+    ...scatterPredicted.map((p) => p.x || 0)
+  );
+  const maxY = Math.max(
+    0,
+    ...scatterTargets.map((p) => p.y || 0),
+    ...scatterMeasured.map((p) => p.y || 0),
+    ...scatterPredicted.map((p) => p.y || 0)
+  );
+  const maxGazeX = Math.max(0, ...trackingSeries.map((p) => p.gazeX ?? 0));
+  const maxGazeY = Math.max(0, ...trackingSeries.map((p) => p.gazeY ?? 0));
+
   const tableRows = pairs.map((p) => {
-    const pred = hasModel && p.valid && p.gaze_avg.x !== null && p.gaze_avg.y !== null
-      ? predict(p.gaze_avg.x, p.gaze_avg.y)
+    const gaze = getGazePoint(p);
+    const pred = hasModel && p.valid && gaze.x !== null && gaze.y !== null
+      ? predict(gaze.x, gaze.y)
       : null;
     const error =
       pred && p.valid
@@ -242,12 +347,12 @@ export default function CalibrationResults() {
       filename: p.target.filename,
       targetX: p.target.x,
       targetY: p.target.y,
-      gazeX: p.gaze_avg.x,
-      gazeY: p.gaze_avg.y,
+      gazeX: gaze.x,
+      gazeY: gaze.y,
       predX: pred?.x ?? null,
       predY: pred?.y ?? null,
       error,
-      nFrames: p.n_frames,
+      nFrames: p.valid_frames_used ?? p.n_frames,
       valid: p.valid,
     };
   });
@@ -404,7 +509,7 @@ export default function CalibrationResults() {
 
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <div className="rounded-lg border bg-white p-3">
-                  <div className="text-sm font-semibold mb-2">Predicted vs Actual</div>
+                  <div className="text-sm font-semibold mb-2">Target vs measured gaze</div>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <ScatterChart>
@@ -423,7 +528,9 @@ export default function CalibrationResults() {
                           name="Y"
                         />
                         <Tooltip cursor={{ strokeDasharray: "3 3" }} />
+                        <Legend />
                         <Scatter name="Target" data={scatterTargets} fill="#111827" />
+                        <Scatter name="Measured gaze" data={scatterMeasured} fill="#f97316" />
                         {hasModel && (
                           <Scatter name="Predicted" data={scatterPredicted} fill="#2563eb" />
                         )}
@@ -433,6 +540,60 @@ export default function CalibrationResults() {
                   {!hasModel && (
                     <div className="text-xs text-gray-500 mt-2">
                       Model not found; predicted points hidden.
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-sm font-semibold mb-2">Tracking timeline</div>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trackingSeries}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                          type="number"
+                          dataKey="t"
+                          domain={["dataMin", "dataMax"]}
+                          name="t"
+                          tickFormatter={(v) => `${v.toFixed(2)}s`}
+                        />
+                        <YAxis
+                          yAxisId="left"
+                          domain={[0, Math.max(maxGazeX, maxX, 1000)]}
+                          name="gaze_x"
+                        />
+                        <YAxis
+                          yAxisId="right"
+                          orientation="right"
+                          domain={[0, Math.max(maxGazeY, maxY, 1000)]}
+                          name="gaze_y"
+                        />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="gazeX"
+                          stroke="#10b981"
+                          dot={false}
+                          isAnimationActive={false}
+                          yAxisId="left"
+                          name="gaze_x"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="gazeY"
+                          stroke="#ef4444"
+                          dot={false}
+                          isAnimationActive={false}
+                          yAxisId="right"
+                          name="gaze_y"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  {trackingSeries.length === 0 && (
+                    <div className="text-xs text-gray-500 mt-2">
+                      {trackingError ?? "No tracking data available for this session."}
                     </div>
                   )}
                 </div>
@@ -466,7 +627,7 @@ export default function CalibrationResults() {
                         <th className="text-left px-3 py-2">Avg gaze (gx, gy)</th>
                         <th className="text-left px-3 py-2">Predicted (x, y)</th>
                         <th className="text-left px-3 py-2">Error (px)</th>
-                        <th className="text-left px-3 py-2">Frames</th>
+                        <th className="text-left px-3 py-2">Valid frames</th>
                       </tr>
                     </thead>
                     <tbody>

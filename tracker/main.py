@@ -706,6 +706,7 @@ class EyeTracker:
         """
         Saves tracking data to CSV and JSON files in the output directory.
         """
+        self._apply_slide_marks()
         df = pd.DataFrame(self.tracking_data)
         csv_path = self.output_dir / f"{self.video_path.stem}_tracking_data.csv"
         df.to_csv(csv_path, index=False)
@@ -720,6 +721,54 @@ class EyeTracker:
 
             json.dump(payload, f, indent=2)
         print(f"✓ JSON: {json_path}")
+
+    def _apply_slide_marks(self):
+        marks_path = self.output_dir / "slide_marks.json"
+        if not marks_path.exists():
+            marks_path = self.output_dir.parent / "slide_marks.json"
+            if not marks_path.exists():
+                return
+        try:
+            with open(marks_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            print(f"[WARN] Failed to read slide_marks.json: {exc}")
+            return
+
+        marks = payload.get("marks", [])
+        normalized = []
+        for mark in marks:
+            filename = mark.get("filename")
+            if not filename:
+                continue
+            if mark.get("t_ms") is not None:
+                try:
+                    t_sec = float(mark["t_ms"]) / 1000.0
+                except (TypeError, ValueError):
+                    continue
+            elif mark.get("t_sec") is not None:
+                try:
+                    t_sec = float(mark["t_sec"])
+                except (TypeError, ValueError):
+                    continue
+            else:
+                continue
+            normalized.append((t_sec, filename))
+
+        if not normalized:
+            return
+
+        normalized.sort(key=lambda item: item[0])
+        idx = 0
+        first_t = normalized[0][0]
+        for frame in self.tracking_data:
+            ts = frame.get("timestamp_sec")
+            if ts is None:
+                continue
+            while idx + 1 < len(normalized) and normalized[idx + 1][0] <= ts:
+                idx += 1
+            if ts >= first_t:
+                frame["filename"] = normalized[idx][1]
 
     def _generate_summary(self):
         """
