@@ -231,6 +231,11 @@ def build_pairs(
         gaze_norm_x_samples = []
         gaze_norm_y_samples = []
 
+        # Also collect raw gaze and timestamps for GST calculation
+        used_gaze_x = []
+        used_gaze_y = []
+        used_timestamps = []
+
         target_debug = None
         if debug:
             target_debug = {
@@ -296,6 +301,24 @@ def build_pairs(
                 continue
 
             valid_frames_used += 1
+
+            # Collect raw gaze for GST calculation (binocular average)
+            frame_gaze_x = None
+            frame_gaze_y = None
+            if left_cx is not None and right_cx is not None:
+                frame_gaze_x = (left_cx + right_cx) / 2.0
+                frame_gaze_y = (left_cy + right_cy) / 2.0
+            elif left_cx is not None:
+                frame_gaze_x = left_cx
+                frame_gaze_y = left_cy
+            elif right_cx is not None:
+                frame_gaze_x = right_cx
+                frame_gaze_y = right_cy
+
+            if frame_gaze_x is not None and frame_gaze_y is not None:
+                used_gaze_x.append(frame_gaze_x)
+                used_gaze_y.append(frame_gaze_y)
+                used_timestamps.append(ts)
 
             if left_valid:
                 left_x_samples.append(float(left_cx))
@@ -444,54 +467,52 @@ def build_pairs(
             x_variance = max(eye_x_samples) - min(eye_x_samples)
             y_variance = max(eye_y_samples) - min(eye_y_samples)
 
-        # Calculate reaction time: time from target appearance until gaze reaches within 2x variance
-        reaction_time_ms = None
-        if eye_avg_x is not None and eye_avg_y is not None and x_variance is not None and y_variance is not None:
-            # Combined variance threshold (use Euclidean distance)
-            variance_threshold = 2.0 * math.hypot(x_variance, y_variance)
+        # Calculate Gaze Settling Time (GST) using the SAME frames calibration used
+        gaze_settling_time_ms = None
+        stability_threshold_px = None
+        stable_found = False
 
-            # Find first frame where gaze is within threshold of target average
-            target_appearance_time = t_ms
-            for f in frames:
-                ts = f.get(ts_key)
-                if ts is None:
-                    continue
+        if len(used_gaze_x) >= 2 and len(used_timestamps) >= 2:
+            # Compute step-wise motion (distance between consecutive frames)
+            step_px = []
+            for i in range(1, len(used_gaze_x)):
+                dx = used_gaze_x[i] - used_gaze_x[i-1]
+                dy = used_gaze_y[i] - used_gaze_y[i-1]
+                step_px.append(math.hypot(dx, dy))
 
-                # Convert timestamp to ms for comparison
-                if timebase_mode == "relative_sec":
-                    frame_time_ms = t0_ms + (ts * 1000.0)
-                else:
-                    frame_time_ms = ts
+            if len(step_px) > 0:
+                # Define stability threshold from the last 10 steps (or fewer)
+                tail_size = min(10, len(step_px))
+                tail = step_px[-tail_size:]
 
-                # Only check frames after target appears
-                if frame_time_ms < target_appearance_time:
-                    continue
+                # Calculate median and MAD of tail
+                tail_median = statistics.median(tail)
+                deviations = [abs(x - tail_median) for x in tail]
+                tail_mad = statistics.median(deviations)
 
-                # Get gaze coordinates for this frame
-                left_cx, left_cy, _ = get_norm_center(f, "left")
-                right_cx, right_cy, _ = get_norm_center(f, "right")
+                # Threshold = median + 3*MAD, clamped to at least 1.0 px
+                stability_threshold_px = max(1.0, tail_median + 3.0 * tail_mad)
 
-                # Calculate binocular gaze for this frame
-                frame_gaze_x = None
-                frame_gaze_y = None
-                if left_cx is not None and right_cx is not None:
-                    frame_gaze_x = (left_cx + right_cx) / 2.0
-                    frame_gaze_y = (left_cy + right_cy) / 2.0
-                elif left_cx is not None:
-                    frame_gaze_x = left_cx
-                    frame_gaze_y = left_cy
-                elif right_cx is not None:
-                    frame_gaze_x = right_cx
-                    frame_gaze_y = right_cy
+                # Find earliest index where motion stays below threshold for 5 consecutive steps
+                consecutive_stable = 0
+                settle_index = None
 
-                if frame_gaze_x is not None and frame_gaze_y is not None:
-                    # Calculate distance from target average
-                    distance = math.hypot(frame_gaze_x - eye_avg_x, frame_gaze_y - eye_avg_y)
+                for i, step in enumerate(step_px):
+                    if step <= stability_threshold_px:
+                        consecutive_stable += 1
+                        if consecutive_stable >= 5:
+                            # Found settling point (back up to start of stable run)
+                            settle_index = i - 4  # First of the 5 consecutive stable steps
+                            stable_found = True
+                            break
+                    else:
+                        consecutive_stable = 0
 
-                    # Check if within threshold (gaze has "reached" target)
-                    if distance <= variance_threshold:
-                        reaction_time_ms = frame_time_ms - target_appearance_time
-                        break
+                # Calculate GST if settling point found
+                if settle_index is not None and settle_index >= 0:
+                    # Time from first used frame to settling frame
+                    time_delta_sec = used_timestamps[settle_index + 1] - used_timestamps[0]
+                    gaze_settling_time_ms = time_delta_sec * 1000.0
 
         # Validity check
         valid = n_frames >= MIN_FRAMES
@@ -535,7 +556,9 @@ def build_pairs(
             "gaze_avg": {"x": eye_avg_x, "y": eye_avg_y},  # Debug only (pixel space)
             "x_variance": x_variance,
             "y_variance": y_variance,
-            "reaction_time_ms": reaction_time_ms,
+            "gaze_settling_time_ms": gaze_settling_time_ms,
+            "stability_threshold_px": stability_threshold_px,
+            "stable_found": stable_found,
             "valid": valid,
             "invalid_reason": invalid_reason,
         }
@@ -611,7 +634,9 @@ def build_report(pairs, coeffs_x, coeffs_y):
             "eye_avg_y": p.get("eye_avg", {}).get("y"),
             "x_variance": p.get("x_variance"),
             "y_variance": p.get("y_variance"),
-            "reaction_time_ms": p.get("reaction_time_ms"),
+            "gaze_settling_time_ms": p.get("gaze_settling_time_ms"),
+            "stability_threshold_px": p.get("stability_threshold_px"),
+            "stable_found": p.get("stable_found"),
             "left_std_x": p["left_std"]["x"],
             "left_std_y": p["left_std"]["y"],
             "right_std_x": p["right_std"]["x"],

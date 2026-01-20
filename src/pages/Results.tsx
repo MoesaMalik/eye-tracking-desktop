@@ -28,7 +28,9 @@ type CalibrationTarget = {
   eye_avg_y: number;
   x_variance?: number;
   y_variance?: number;
-  reaction_time_ms?: number;
+  gaze_settling_time_ms?: number;
+  stability_threshold_px?: number;
+  stable_found?: boolean;
   left_avg_x?: number;
   left_avg_y?: number;
   right_avg_x?: number;
@@ -59,8 +61,8 @@ type SlideRow = {
   baselineMean: { x: number; y: number };
   rerunMean: { x: number; y: number };
   distance: number;
-  baselineReactionTime: number | null;
-  rerunReactionTime: number | null;
+  baselineGST: number | null;
+  rerunGST: number | null;
   pctScreenDiag: number;
   screenW: number;
   screenH: number;
@@ -412,8 +414,8 @@ export default function Results() {
         baselineMean: { x: baseMeanX, y: baseMeanY },
         rerunMean: { x: runMeanX, y: runMeanY },
         distance,
-        baselineReactionTime: baseline.reaction_time_ms ?? null,
-        rerunReactionTime: rerun.reaction_time_ms ?? null,
+        baselineGST: baseline.gaze_settling_time_ms ?? null,
+        rerunGST: rerun.gaze_settling_time_ms ?? null,
         pctScreenDiag,
         screenW: screen.width,
         screenH: screen.height,
@@ -520,7 +522,7 @@ export default function Results() {
         </div>
 
         <div className="text-xs text-gray-500">
-          Reaction time measures how long (in milliseconds) it takes from target appearance until gaze reaches within 2x variance of the target position.
+          Gaze Settling Time (GST) measures how long (in milliseconds) from the first frame until gaze motion stays below a stability threshold for 5 consecutive steps.
           % Screen (diag) uses the window size captured when you click Compare.
         </div>
       </div>
@@ -544,15 +546,15 @@ export default function Results() {
                   <th className="px-3 py-2 text-left">Distance</th>
                   <th
                     className="px-3 py-2 text-left"
-                    title="Baseline reaction time (ms from target appearance until gaze reaches within 2x variance)"
+                    title="Baseline gaze settling time (ms from first frame until gaze motion stays below threshold for 5 consecutive steps)"
                   >
-                    Baseline RT (ms)
+                    Baseline GST (ms)
                   </th>
                   <th
                     className="px-3 py-2 text-left"
-                    title="Rerun reaction time (ms from target appearance until gaze reaches within 2x variance)"
+                    title="Rerun gaze settling time (ms from first frame until gaze motion stays below threshold for 5 consecutive steps)"
                   >
-                    Rerun RT (ms)
+                    Rerun GST (ms)
                   </th>
                   <th
                     className="px-3 py-2 text-left"
@@ -575,13 +577,13 @@ export default function Results() {
                     </td>
                     <td className="px-3 py-2">{row.distance.toFixed(1)}</td>
                     <td className="px-3 py-2">
-                      {row.baselineReactionTime !== null
-                        ? row.baselineReactionTime.toFixed(0)
+                      {row.baselineGST !== null
+                        ? row.baselineGST.toFixed(0)
                         : "—"}
                     </td>
                     <td className="px-3 py-2">
-                      {row.rerunReactionTime !== null
-                        ? row.rerunReactionTime.toFixed(0)
+                      {row.rerunGST !== null
+                        ? row.rerunGST.toFixed(0)
                         : "—"}
                     </td>
                     <td className="px-3 py-2">{formatPct(row.pctScreenDiag, 2)}</td>
