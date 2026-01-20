@@ -36,6 +36,10 @@ type SlideRow = {
   rerunMean: { x: number; y: number };
   distance: number;
   diffPct: number;
+  pctScreenDiag: number;
+  screenW: number;
+  screenH: number;
+  screenDiag: number;
 };
 
 function invokeIpc(channel: string, payload?: unknown) {
@@ -121,11 +125,23 @@ function collectSlides(frames: TrackingFrame[]) {
   return map;
 }
 
-function compareSlides(baseline: Map<string, SlideAccumulator>, rerun: Map<string, SlideAccumulator>) {
+type ScreenSize = {
+  width: number;
+  height: number;
+};
+
+function compareSlides(
+  baseline: Map<string, SlideAccumulator>,
+  rerun: Map<string, SlideAccumulator>,
+  screen: ScreenSize
+) {
   const rows: SlideRow[] = [];
   const missingBaseline: string[] = [];
   const missingRerun: string[] = [];
   const keys = new Set([...baseline.keys(), ...rerun.keys()]);
+  const screenW = Math.max(0, screen.width);
+  const screenH = Math.max(0, screen.height);
+  const screenDiag = Math.hypot(screenW, screenH);
 
   for (const key of keys) {
     const base = baseline.get(key);
@@ -152,6 +168,7 @@ function compareSlides(baseline: Map<string, SlideAccumulator>, rerun: Map<strin
     const maxY = Math.max(base.maxY, run.maxY);
     const scale = Math.hypot(maxX - minX, maxY - minY);
     const diffPct = scale > 0 ? Math.min(100, (distance / scale) * 100) : (distance === 0 ? 0 : 100);
+    const pctScreenDiag = screenDiag > 0 ? (distance / screenDiag) * 100 : 0;
 
     rows.push({
       key,
@@ -162,11 +179,26 @@ function compareSlides(baseline: Map<string, SlideAccumulator>, rerun: Map<strin
       rerunMean: { x: runMeanX, y: runMeanY },
       distance,
       diffPct,
+      pctScreenDiag,
+      screenW,
+      screenH,
+      screenDiag,
     });
   }
 
   rows.sort((a, b) => a.label.localeCompare(b.label));
   return { rows, missingBaseline, missingRerun };
+}
+
+function resolveScreenSize(): ScreenSize {
+  if (typeof window === "undefined") return { width: 0, height: 0 };
+  const width = window.innerWidth || window.screen?.width || 0;
+  const height = window.innerHeight || window.screen?.height || 0;
+  return { width, height };
+}
+
+function formatPct(value: number, digits = 2) {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}%` : "—";
 }
 
 export default function Results() {
@@ -252,6 +284,16 @@ export default function Results() {
     setMissingBaseline([]);
     setMissingRerun([]);
 
+    const screen = resolveScreenSize();
+    if (import.meta.env.DEV) {
+      const diag = Math.hypot(screen.width, screen.height);
+      const testDist = 33;
+      const pct = diag > 0 ? (testDist / diag) * 100 : 0;
+      console.log(
+        `[Results] pctScreenDiag sanity: dist=${testDist} screen=${screen.width}x${screen.height} pct=${pct.toFixed(2)}%`
+      );
+    }
+
     const [baseRes, rerunRes] = await Promise.all([
       invokeIpc("recordings:readTracking", { sessionId: baselineId }),
       invokeIpc("recordings:readTracking", { sessionId: rerunId }),
@@ -267,7 +309,7 @@ export default function Results() {
     const rerunFrames = toFrames(rerunRes.data);
     const baseMap = collectSlides(baseFrames);
     const rerunMap = collectSlides(rerunFrames);
-    const comparison = compareSlides(baseMap, rerunMap);
+    const comparison = compareSlides(baseMap, rerunMap, screen);
 
     setRows(comparison.rows);
     setMissingBaseline(comparison.missingBaseline);
@@ -367,6 +409,7 @@ export default function Results() {
 
         <div className="text-xs text-gray-500">
           Difference percent uses the distance between mean gaze points, normalized by the combined gaze spread per slide.
+          % Screen (diag) uses the window size captured when you click Compare.
         </div>
       </div>
 
@@ -387,7 +430,18 @@ export default function Results() {
                   <th className="px-3 py-2 text-left">Baseline mean (x,y)</th>
                   <th className="px-3 py-2 text-left">Rerun mean (x,y)</th>
                   <th className="px-3 py-2 text-left">Distance</th>
-                  <th className="px-3 py-2 text-left">Difference %</th>
+                  <th
+                    className="px-3 py-2 text-left"
+                    title="Difference % = mean shift divided by within-slide gaze spread (scale)"
+                  >
+                    Shift/Spread %
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left"
+                    title="% Screen (diag) = mean shift as a percent of screen diagonal"
+                  >
+                    % Screen (diag)
+                  </th>
                   <th className="px-3 py-2 text-left">Frames</th>
                 </tr>
               </thead>
@@ -403,6 +457,7 @@ export default function Results() {
                     </td>
                     <td className="px-3 py-2">{row.distance.toFixed(1)}</td>
                     <td className="px-3 py-2">{row.diffPct.toFixed(1)}%</td>
+                    <td className="px-3 py-2">{formatPct(row.pctScreenDiag, 2)}</td>
                     <td className="px-3 py-2">
                       {row.baselineCount} / {row.rerunCount}
                     </td>
