@@ -26,6 +26,9 @@ type CalibrationTarget = {
   valid_frames_used: number;
   eye_avg_x: number;
   eye_avg_y: number;
+  x_variance?: number;
+  y_variance?: number;
+  reaction_time_ms?: number;
   left_avg_x?: number;
   left_avg_y?: number;
   right_avg_x?: number;
@@ -56,7 +59,8 @@ type SlideRow = {
   baselineMean: { x: number; y: number };
   rerunMean: { x: number; y: number };
   distance: number;
-  diffPct: number;
+  baselineReactionTime: number | null;
+  rerunReactionTime: number | null;
   pctScreenDiag: number;
   screenW: number;
   screenH: number;
@@ -408,7 +412,8 @@ export default function Results() {
         baselineMean: { x: baseMeanX, y: baseMeanY },
         rerunMean: { x: runMeanX, y: runMeanY },
         distance,
-        diffPct: 0, // Not relevant for calibration targets
+        baselineReactionTime: baseline.reaction_time_ms ?? null,
+        rerunReactionTime: rerun.reaction_time_ms ?? null,
         pctScreenDiag,
         screenW: screen.width,
         screenH: screen.height,
@@ -515,7 +520,7 @@ export default function Results() {
         </div>
 
         <div className="text-xs text-gray-500">
-          Difference percent uses the distance between mean gaze points, normalized by the combined gaze spread per slide.
+          Reaction time measures how long (in milliseconds) it takes from target appearance until gaze reaches within 2x variance of the target position.
           % Screen (diag) uses the window size captured when you click Compare.
         </div>
       </div>
@@ -539,9 +544,15 @@ export default function Results() {
                   <th className="px-3 py-2 text-left">Distance</th>
                   <th
                     className="px-3 py-2 text-left"
-                    title="Difference % = mean shift divided by within-slide gaze spread (scale)"
+                    title="Baseline reaction time (ms from target appearance until gaze reaches within 2x variance)"
                   >
-                    Shift/Spread %
+                    Baseline RT (ms)
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left"
+                    title="Rerun reaction time (ms from target appearance until gaze reaches within 2x variance)"
+                  >
+                    Rerun RT (ms)
                   </th>
                   <th
                     className="px-3 py-2 text-left"
@@ -563,7 +574,16 @@ export default function Results() {
                       {Math.round(row.rerunMean.x)}, {Math.round(row.rerunMean.y)}
                     </td>
                     <td className="px-3 py-2">{row.distance.toFixed(1)}</td>
-                    <td className="px-3 py-2">{row.diffPct.toFixed(1)}%</td>
+                    <td className="px-3 py-2">
+                      {row.baselineReactionTime !== null
+                        ? row.baselineReactionTime.toFixed(0)
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {row.rerunReactionTime !== null
+                        ? row.rerunReactionTime.toFixed(0)
+                        : "—"}
+                    </td>
                     <td className="px-3 py-2">{formatPct(row.pctScreenDiag, 2)}</td>
                     <td className="px-3 py-2">
                       {row.baselineCount} / {row.rerunCount}

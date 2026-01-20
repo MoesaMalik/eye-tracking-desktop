@@ -413,16 +413,86 @@ def build_pairs(
         # Compute binocular gaze (pixel space, for debugging only)
         eye_avg_x = None
         eye_avg_y = None
-        if left_avg_x is not None and right_avg_x is not None:
+        eye_x_samples = []
+        eye_y_samples = []
+
+        # Build binocular samples for variance calculation
+        if left_x_samples and right_x_samples:
+            # Use binocular average for each frame
+            for i in range(min(len(left_x_samples), len(right_x_samples))):
+                eye_x_samples.append((left_x_samples[i] + right_x_samples[i]) / 2.0)
+                eye_y_samples.append((left_y_samples[i] + right_y_samples[i]) / 2.0)
             eye_avg_x = (left_avg_x + right_avg_x) / 2.0
             eye_avg_y = (left_avg_y + right_avg_y) / 2.0
-        elif left_avg_x is not None:
+        elif left_x_samples:
+            # Use left eye only
+            eye_x_samples = left_x_samples[:]
+            eye_y_samples = left_y_samples[:]
             eye_avg_x = left_avg_x
             eye_avg_y = left_avg_y
-        elif right_avg_x is not None:
+        elif right_x_samples:
+            # Use right eye only
+            eye_x_samples = right_x_samples[:]
+            eye_y_samples = right_y_samples[:]
             eye_avg_x = right_avg_x
             eye_avg_y = right_avg_y
-        
+
+        # Calculate variance (range = max - min) for binocular gaze
+        x_variance = None
+        y_variance = None
+        if eye_x_samples and eye_y_samples:
+            x_variance = max(eye_x_samples) - min(eye_x_samples)
+            y_variance = max(eye_y_samples) - min(eye_y_samples)
+
+        # Calculate reaction time: time from target appearance until gaze reaches within 2x variance
+        reaction_time_ms = None
+        if eye_avg_x is not None and eye_avg_y is not None and x_variance is not None and y_variance is not None:
+            # Combined variance threshold (use Euclidean distance)
+            variance_threshold = 2.0 * math.hypot(x_variance, y_variance)
+
+            # Find first frame where gaze is within threshold of target average
+            target_appearance_time = t_ms
+            for f in frames:
+                ts = f.get(ts_key)
+                if ts is None:
+                    continue
+
+                # Convert timestamp to ms for comparison
+                if timebase_mode == "relative_sec":
+                    frame_time_ms = t0_ms + (ts * 1000.0)
+                else:
+                    frame_time_ms = ts
+
+                # Only check frames after target appears
+                if frame_time_ms < target_appearance_time:
+                    continue
+
+                # Get gaze coordinates for this frame
+                left_cx, left_cy, _ = get_norm_center(f, "left")
+                right_cx, right_cy, _ = get_norm_center(f, "right")
+
+                # Calculate binocular gaze for this frame
+                frame_gaze_x = None
+                frame_gaze_y = None
+                if left_cx is not None and right_cx is not None:
+                    frame_gaze_x = (left_cx + right_cx) / 2.0
+                    frame_gaze_y = (left_cy + right_cy) / 2.0
+                elif left_cx is not None:
+                    frame_gaze_x = left_cx
+                    frame_gaze_y = left_cy
+                elif right_cx is not None:
+                    frame_gaze_x = right_cx
+                    frame_gaze_y = right_cy
+
+                if frame_gaze_x is not None and frame_gaze_y is not None:
+                    # Calculate distance from target average
+                    distance = math.hypot(frame_gaze_x - eye_avg_x, frame_gaze_y - eye_avg_y)
+
+                    # Check if within threshold (gaze has "reached" target)
+                    if distance <= variance_threshold:
+                        reaction_time_ms = frame_time_ms - target_appearance_time
+                        break
+
         # Validity check
         valid = n_frames >= MIN_FRAMES
         invalid_reason = None
@@ -463,6 +533,9 @@ def build_pairs(
             "gaze_norm_avg": {"x": gaze_norm_avg_x, "y": gaze_norm_avg_y},
             "eye_avg": {"x": eye_avg_x, "y": eye_avg_y},
             "gaze_avg": {"x": eye_avg_x, "y": eye_avg_y},  # Debug only (pixel space)
+            "x_variance": x_variance,
+            "y_variance": y_variance,
+            "reaction_time_ms": reaction_time_ms,
             "valid": valid,
             "invalid_reason": invalid_reason,
         }
@@ -536,6 +609,9 @@ def build_report(pairs, coeffs_x, coeffs_y):
             "gaze_norm_avg_y": p.get("gaze_norm_avg", {}).get("y"),
             "eye_avg_x": p.get("eye_avg", {}).get("x"),
             "eye_avg_y": p.get("eye_avg", {}).get("y"),
+            "x_variance": p.get("x_variance"),
+            "y_variance": p.get("y_variance"),
+            "reaction_time_ms": p.get("reaction_time_ms"),
             "left_std_x": p["left_std"]["x"],
             "left_std_y": p["left_std"]["y"],
             "right_std_x": p["right_std"]["x"],
