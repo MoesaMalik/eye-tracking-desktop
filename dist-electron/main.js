@@ -465,6 +465,41 @@ ipcMain.handle(
     }
   }
 );
+ipcMain.handle(
+  "recordings:readCalibrationReport",
+  async (_e, { sessionId }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, error: "Session folder not found" };
+      }
+      const findCalibrationReport = (dir) => {
+        const files = fs.readdirSync(dir, { withFileTypes: true });
+        for (const file of files) {
+          const fullPath = path.join(dir, file.name);
+          if (file.isDirectory()) {
+            const found = findCalibrationReport(fullPath);
+            if (found) return found;
+          } else if (file.name === "calibration_report.json") {
+            return fullPath;
+          }
+        }
+        return null;
+      };
+      const reportPath = findCalibrationReport(sessionPath);
+      if (!reportPath) {
+        return { ok: false, error: "Calibration report not found" };
+      }
+      const raw = fs.readFileSync(reportPath, "utf-8");
+      const data = JSON.parse(raw);
+      return { ok: true, data, filename: path.basename(reportPath) };
+    } catch (e) {
+      return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
+    }
+  }
+);
 ipcMain.handle("calibration:run", async (_e, { sessionId }) => {
   try {
     const recDir = path.join(process.env.APP_ROOT, "recordings");

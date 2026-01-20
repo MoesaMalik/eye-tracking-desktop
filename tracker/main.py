@@ -26,6 +26,7 @@ import mediapipe as mp
 from tqdm import tqdm
 import json
 import sys
+import subprocess
 
 # Import from new modules
 try:
@@ -745,6 +746,7 @@ class EyeTracker:
         print(f"\n✓ Tracked video: {output_video_path}")
         self._save_tracking_data()
         self._generate_summary()
+        self._auto_generate_calibration()
         return self.tracking_data
 
     def _save_tracking_data(self):
@@ -874,6 +876,57 @@ class EyeTracker:
             print(f"  Fallback: {r_mp_n:>3} ({r_mp_pct:>5.1f}%)")
             print(f"  Blink:    {r_blink_n:>3} ({r_blink_pct:>5.1f}%)")
             print(f"{'=' * 70}\n")
+
+    def _auto_generate_calibration(self):
+        """
+        Automatically generates calibration files if calibration_targets.json exists.
+        This runs after tracking data is saved.
+        """
+        # Check for calibration_targets.json in parent directory (session root)
+        targets_path = self.output_dir.parent / "calibration_targets.json"
+        if not targets_path.exists():
+            # Also check in output_dir itself
+            targets_path = self.output_dir / "calibration_targets.json"
+            if not targets_path.exists():
+                return  # No calibration targets, skip
+
+        print("\n" + "=" * 70)
+        print("AUTO-GENERATING CALIBRATION")
+        print("=" * 70)
+
+        # Find the calibration_fit.py script
+        script_dir = Path(__file__).parent
+        calibration_script = script_dir / "calibration_fit.py"
+
+        if not calibration_script.exists():
+            print(f"[WARN] Calibration script not found at {calibration_script}")
+            return
+
+        # Run calibration_fit.py with the session directory (parent of output_dir)
+        session_dir = self.output_dir.parent
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(calibration_script), str(session_dir)],
+                cwd=str(script_dir.parent),  # Run from project root
+                capture_output=True,
+                text=True,
+                timeout=60  # 60 second timeout
+            )
+
+            if result.returncode == 0:
+                print("✓ Calibration generated successfully")
+                if result.stdout:
+                    print(result.stdout)
+            else:
+                print(f"[ERROR] Calibration failed with exit code {result.returncode}")
+                if result.stderr:
+                    print("Error output:")
+                    print(result.stderr)
+        except subprocess.TimeoutExpired:
+            print("[ERROR] Calibration generation timed out after 60 seconds")
+        except Exception as e:
+            print(f"[ERROR] Failed to run calibration: {e}")
 
 
 def parse_args():

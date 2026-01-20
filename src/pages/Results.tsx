@@ -11,6 +11,27 @@ type TrackingFrame = {
   gaze_y?: number | null;
   gaze_x_raw?: number | null;
   gaze_y_raw?: number | null;
+  left_center_x?: number | null;
+  left_center_y?: number | null;
+  right_center_x?: number | null;
+  right_center_y?: number | null;
+  is_blink?: boolean;
+};
+
+type CalibrationTarget = {
+  filename: string;
+  x: number;
+  y: number;
+  n_frames: number;
+  valid_frames_used: number;
+  eye_avg_x: number;
+  eye_avg_y: number;
+  left_avg_x?: number;
+  left_avg_y?: number;
+  right_avg_x?: number;
+  right_avg_y?: number;
+  valid: boolean;
+  error_px?: number;
 };
 
 type SlideAccumulator = {
@@ -56,16 +77,32 @@ function toFrames(payload: any): TrackingFrame[] {
 }
 
 function getGazePoint(frame: TrackingFrame) {
-  const x = typeof frame.gaze_x_raw === "number"
-    ? frame.gaze_x_raw
-    : typeof frame.gaze_x === "number"
-      ? frame.gaze_x
-      : null;
-  const y = typeof frame.gaze_y_raw === "number"
-    ? frame.gaze_y_raw
-    : typeof frame.gaze_y === "number"
-      ? frame.gaze_y
-      : null;
+  // Calculate eye_avg_x and eye_avg_y exactly like calibration_report.json
+  // eye_avg_x = (left_center_x + right_center_x) / 2.0
+  // eye_avg_y = (left_center_y + right_center_y) / 2.0
+
+  const leftX = typeof frame.left_center_x === "number" ? frame.left_center_x : null;
+  const leftY = typeof frame.left_center_y === "number" ? frame.left_center_y : null;
+  const rightX = typeof frame.right_center_x === "number" ? frame.right_center_x : null;
+  const rightY = typeof frame.right_center_y === "number" ? frame.right_center_y : null;
+
+  let x: number | null = null;
+  let y: number | null = null;
+
+  // Use binocular average if both eyes available
+  if (leftX !== null && rightX !== null && leftY !== null && rightY !== null) {
+    x = (leftX + rightX) / 2.0;
+    y = (leftY + rightY) / 2.0;
+  } else if (leftX !== null && leftY !== null) {
+    // Use left eye only
+    x = leftX;
+    y = leftY;
+  } else if (rightX !== null && rightY !== null) {
+    // Use right eye only
+    x = rightX;
+    y = rightY;
+  }
+
   if (x === null || y === null) return null;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   return { x, y };
@@ -87,10 +124,24 @@ function slideLabel(acc: SlideAccumulator) {
 
 function collectSlides(frames: TrackingFrame[]) {
   const map = new Map<string, SlideAccumulator>();
+  // Track frame counts per slide to skip first 5 frames
+  const frameCountPerSlide = new Map<string, number>();
+
   for (const frame of frames) {
     if (!frame.filename) continue;
     const key = slideKey(frame);
     if (!key) continue;
+
+    // Skip frames where person is blinking
+    if (frame.is_blink === true) continue;
+
+    // Track frame order for this slide
+    const frameCount = (frameCountPerSlide.get(key) ?? 0) + 1;
+    frameCountPerSlide.set(key, frameCount);
+
+    // Skip first 5 frames for each slide
+    if (frameCount <= 5) continue;
+
     const gaze = getGazePoint(frame);
     if (!gaze) continue;
     const protocol = frame.protocol_key ?? null;
@@ -294,26 +345,82 @@ export default function Results() {
       );
     }
 
+    // Load calibration reports instead of tracking data
     const [baseRes, rerunRes] = await Promise.all([
-      invokeIpc("recordings:readTracking", { sessionId: baselineId }),
-      invokeIpc("recordings:readTracking", { sessionId: rerunId }),
+      invokeIpc("recordings:readCalibrationReport", { sessionId: baselineId }),
+      invokeIpc("recordings:readCalibrationReport", { sessionId: rerunId }),
     ]);
 
     if (!baseRes?.ok || !rerunRes?.ok) {
-      setError(baseRes?.error || rerunRes?.error || "Failed to load tracking data.");
+      setError(baseRes?.error || rerunRes?.error || "Failed to load calibration report data.");
       setLoading(false);
       return;
     }
 
-    const baseFrames = toFrames(baseRes.data);
-    const rerunFrames = toFrames(rerunRes.data);
-    const baseMap = collectSlides(baseFrames);
-    const rerunMap = collectSlides(rerunFrames);
-    const comparison = compareSlides(baseMap, rerunMap, screen);
+    // Extract per_target data from calibration reports
+    const baseTargets = baseRes.data?.per_target || [];
+    const rerunTargets = rerunRes.data?.per_target || [];
 
-    setRows(comparison.rows);
-    setMissingBaseline(comparison.missingBaseline);
-    setMissingRerun(comparison.missingRerun);
+    // Build comparison rows from calibration report data
+    const targetMap = new Map<string, any>();
+    const screenDiag = Math.hypot(screen.width, screen.height);
+
+    // Index baseline targets by filename
+    for (const target of baseTargets) {
+      if (!target.filename) continue;
+      targetMap.set(target.filename, { baseline: target, rerun: null });
+    }
+
+    // Match rerun targets
+    for (const target of rerunTargets) {
+      if (!target.filename) continue;
+      const existing = targetMap.get(target.filename);
+      if (existing) {
+        existing.rerun = target;
+      } else {
+        targetMap.set(target.filename, { baseline: null, rerun: target });
+      }
+    }
+
+    const comparisonRows: SlideRow[] = [];
+    const missing: string[] = [];
+
+    for (const [filename, { baseline, rerun }] of targetMap.entries()) {
+      if (!baseline || !rerun) {
+        missing.push(filename);
+        continue;
+      }
+
+      // Use eye_avg_x and eye_avg_y from calibration report
+      const baseMeanX = baseline.eye_avg_x ?? 0;
+      const baseMeanY = baseline.eye_avg_y ?? 0;
+      const runMeanX = rerun.eye_avg_x ?? 0;
+      const runMeanY = rerun.eye_avg_y ?? 0;
+
+      const distance = Math.hypot(baseMeanX - runMeanX, baseMeanY - runMeanY);
+      const pctScreenDiag = screenDiag > 0 ? (distance / screenDiag) * 100 : 0;
+
+      comparisonRows.push({
+        key: filename,
+        label: filename,
+        baselineCount: baseline.valid_frames_used ?? 0,
+        rerunCount: rerun.valid_frames_used ?? 0,
+        baselineMean: { x: baseMeanX, y: baseMeanY },
+        rerunMean: { x: runMeanX, y: runMeanY },
+        distance,
+        diffPct: 0, // Not relevant for calibration targets
+        pctScreenDiag,
+        screenW: screen.width,
+        screenH: screen.height,
+        screenDiag,
+      });
+    }
+
+    comparisonRows.sort((a, b) => a.label.localeCompare(b.label));
+
+    setRows(comparisonRows);
+    setMissingBaseline(missing.filter(f => !rerunTargets.find(t => t.filename === f)));
+    setMissingRerun(missing.filter(f => !baseTargets.find(t => t.filename === f)));
     setLoading(false);
   }
 
