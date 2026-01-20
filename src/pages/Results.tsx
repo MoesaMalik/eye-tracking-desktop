@@ -31,6 +31,8 @@ type CalibrationTarget = {
   gaze_settling_time_ms?: number;
   stability_threshold_px?: number;
   stable_found?: boolean;
+  avg_frame_variance_px2?: number;
+  jitter_rms_px?: number;
   left_avg_x?: number;
   left_avg_y?: number;
   right_avg_x?: number;
@@ -63,6 +65,8 @@ type SlideRow = {
   distance: number;
   baselineGST: number | null;
   rerunGST: number | null;
+  baselineJitter: number | null;
+  rerunJitter: number | null;
   pctScreenDiag: number;
   screenW: number;
   screenH: number;
@@ -416,6 +420,8 @@ export default function Results() {
         distance,
         baselineGST: baseline.gaze_settling_time_ms ?? null,
         rerunGST: rerun.gaze_settling_time_ms ?? null,
+        baselineJitter: baseline.jitter_rms_px ?? null,
+        rerunJitter: rerun.jitter_rms_px ?? null,
         pctScreenDiag,
         screenW: screen.width,
         screenH: screen.height,
@@ -523,6 +529,7 @@ export default function Results() {
 
         <div className="text-xs text-gray-500">
           Gaze Settling Time (GST) measures how long (in milliseconds) from the first frame until gaze motion stays below a stability threshold for 5 consecutive steps.
+          Jitter (px) is the RMS deviation of gaze from the mean position during calibration, indicating fixation stability.
           % Screen (diag) uses the window size captured when you click Compare.
         </div>
       </div>
@@ -558,6 +565,18 @@ export default function Results() {
                   </th>
                   <th
                     className="px-3 py-2 text-left"
+                    title="Baseline jitter RMS (px) - root mean square deviation from mean gaze position"
+                  >
+                    Baseline Jitter (px)
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left"
+                    title="Rerun jitter RMS (px) - root mean square deviation from mean gaze position"
+                  >
+                    Rerun Jitter (px)
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left"
                     title="% Screen (diag) = mean shift as a percent of screen diagonal"
                   >
                     % Screen (diag)
@@ -584,6 +603,16 @@ export default function Results() {
                     <td className="px-3 py-2">
                       {row.rerunGST !== null
                         ? row.rerunGST.toFixed(0)
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {row.baselineJitter !== null
+                        ? row.baselineJitter.toFixed(1)
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {row.rerunJitter !== null
+                        ? row.rerunJitter.toFixed(1)
                         : "—"}
                     </td>
                     <td className="px-3 py-2">{formatPct(row.pctScreenDiag, 2)}</td>

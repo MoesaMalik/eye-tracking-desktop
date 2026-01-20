@@ -514,6 +514,30 @@ def build_pairs(
                     time_delta_sec = used_timestamps[settle_index + 1] - used_timestamps[0]
                     gaze_settling_time_ms = time_delta_sec * 1000.0
 
+        # Calculate jitter metrics using the SAME frames as GST
+        # This measures gaze stability around the mean gaze position
+        avg_frame_variance_px2 = None
+        jitter_rms_px = None
+
+        if len(used_gaze_x) >= 3 and len(used_gaze_y) >= 3:
+            # Compute mean gaze position
+            mx = sum(used_gaze_x) / len(used_gaze_x)
+            my = sum(used_gaze_y) / len(used_gaze_y)
+
+            # Compute squared distance from mean for each frame
+            squared_distances = []
+            for i in range(len(used_gaze_x)):
+                dx = used_gaze_x[i] - mx
+                dy = used_gaze_y[i] - my
+                d2 = dx * dx + dy * dy
+                squared_distances.append(d2)
+
+            # Average frame variance (mean squared distance)
+            avg_frame_variance_px2 = sum(squared_distances) / len(squared_distances)
+
+            # Jitter RMS (root mean square)
+            jitter_rms_px = math.sqrt(avg_frame_variance_px2)
+
         # Validity check
         valid = n_frames >= MIN_FRAMES
         invalid_reason = None
@@ -559,6 +583,8 @@ def build_pairs(
             "gaze_settling_time_ms": gaze_settling_time_ms,
             "stability_threshold_px": stability_threshold_px,
             "stable_found": stable_found,
+            "avg_frame_variance_px2": avg_frame_variance_px2,
+            "jitter_rms_px": jitter_rms_px,
             "valid": valid,
             "invalid_reason": invalid_reason,
         }
@@ -637,6 +663,8 @@ def build_report(pairs, coeffs_x, coeffs_y):
             "gaze_settling_time_ms": p.get("gaze_settling_time_ms"),
             "stability_threshold_px": p.get("stability_threshold_px"),
             "stable_found": p.get("stable_found"),
+            "avg_frame_variance_px2": p.get("avg_frame_variance_px2"),
+            "jitter_rms_px": p.get("jitter_rms_px"),
             "left_std_x": p["left_std"]["x"],
             "left_std_y": p["left_std"]["y"],
             "right_std_x": p["right_std"]["x"],
