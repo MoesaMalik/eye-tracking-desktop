@@ -57,6 +57,14 @@ export default function App() {
             >
               Recorder
             </NavLink>
+            <NavLink
+              to="/analyze-video"
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`
+              }
+            >
+              Analyze Video
+            </NavLink>
           </nav>
         </div>
       </header>

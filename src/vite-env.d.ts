@@ -21,6 +21,8 @@ declare global {
         cam?: number;
         outDir?: string;
         script?: string;
+        preview?: boolean;
+        videoPath?: string;
       }) => Promise<{ ok: boolean; message: string }>;
       stop: () => Promise<{ ok: boolean; message: string }>;
       onStdout?: (cb: (line: string) => void) => () => void;

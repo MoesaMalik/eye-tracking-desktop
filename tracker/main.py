@@ -27,6 +27,7 @@ from tqdm import tqdm
 import json
 import sys
 import subprocess
+from datetime import datetime
 
 # Import from new modules
 try:
@@ -936,6 +937,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Eye tracking recorder/analyzer")
     parser.add_argument("--no-preview", action="store_true", help="Disable the OpenCV preview window")
     parser.add_argument("--output-dir", type=str, default=None, help="Custom output directory for recordings")
+    parser.add_argument("--video", type=str, default=None, help="Analyze an existing video file instead of recording")
     parser.add_argument("--show-raw-overlay", action="store_true", help="Show raw (unsmoothed) iris centers in overlay (debug)")
     parser.add_argument("--smoothing", type=str, choices=['off', 'light', 'medium', 'heavy'],
                        default=DEFAULT_SMOOTHING_MODE, help="Smoothing preset (default: light)")
@@ -962,19 +964,33 @@ def main():
     print("EYE TRACKING - RECORD & ANALYZE (Improved Algorithm)")
     print("=" * 70)
 
-    try:
-        video_path, fps = record_video(
-            CAM_INDEX,
-            output_dir=output_dir,
-            show_preview=show_preview,
-            stop_check=lambda: stop_requested,
-        )
-        use_video = video_path
-    except Exception as e:
-        print(f"\n[WARN] {e}")
-        return
-
-    process_output_dir = Path(use_video).parent
+    if args.video:
+        use_video = args.video
+        if not Path(use_video).exists():
+            print(f"\n[WARN] Video file not found: {use_video}")
+            return
+        if args.output_dir:
+            process_output_dir = Path(args.output_dir)
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_stem = Path(use_video).stem.replace(" ", "_")
+            process_output_dir = Path("recordings") / f"import_{safe_stem}_{stamp}"
+        process_output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Using existing video: {use_video}")
+        print(f"[INFO] Output directory: {process_output_dir}")
+    else:
+        try:
+            video_path, fps = record_video(
+                CAM_INDEX,
+                output_dir=output_dir,
+                show_preview=show_preview,
+                stop_check=lambda: stop_requested,
+            )
+            use_video = video_path
+        except Exception as e:
+            print(f"\n[WARN] {e}")
+            return
+        process_output_dir = Path(use_video).parent
 
     try:
         tracker = EyeTracker(

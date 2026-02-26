@@ -13,7 +13,7 @@ function subscribe<T extends any[]>(
 
 /* -------- Tracker-specific, typed bridge -------- */
 contextBridge.exposeInMainWorld("tracker", {
-  start: (opts: { cam?: number; outDir?: string; script?: string; preview?: boolean } = {}) =>
+  start: (opts: { cam?: number; outDir?: string; script?: string; preview?: boolean; videoPath?: string } = {}) =>
     ipcRenderer.invoke("tracking:start", opts),
   stop: () => ipcRenderer.invoke("tracking:stop"),
   onStdout: (cb: (line: string) => void) => subscribe("tracking:stdout", cb),

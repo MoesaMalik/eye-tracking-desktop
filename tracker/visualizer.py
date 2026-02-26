@@ -1,4 +1,5 @@
 import cv2
+import math
 
 # Visualization colors
 VIS_COLORS = {
@@ -12,6 +13,18 @@ VIS_COLORS = {
     'roi_box': (0, 255, 0),  # ROI rectangle
     'head_ok': (0, 220, 0),
 }
+
+
+def _is_finite_number(value):
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _fmt_int(value):
+    return str(int(value)) if _is_finite_number(value) else "--"
+
+
+def _fmt_float(value, digits=2):
+    return f"{value:.{digits}f}" if _is_finite_number(value) else "--"
 
 def draw_overlay(frame, data, total_frames):
     """
@@ -31,18 +44,18 @@ def draw_overlay(frame, data, total_frames):
 
     if 'left_center_x' in data:
         cv2.putText(frame,
-                    f"L center: ({int(data['left_center_x'])},{int(data['left_center_y'])}) "
-                    f"conf {data['left_confidence']:.2f} [{data['left_method']}]",
+                    f"L center: ({_fmt_int(data.get('left_center_x'))},{_fmt_int(data.get('left_center_y'))}) "
+                    f"conf {_fmt_float(data.get('left_confidence'))} [{data.get('left_method', '--')}]",
                     (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['left_dot'], 1)
     y += 25
     if 'right_center_x' in data:
         cv2.putText(frame,
-                    f"R center: ({int(data['right_center_x'])},{int(data['right_center_y'])}) "
-                    f"conf {data['right_confidence']:.2f} [{data['right_method']}]",
+                    f"R center: ({_fmt_int(data.get('right_center_x'))},{_fmt_int(data.get('right_center_y'))}) "
+                    f"conf {_fmt_float(data.get('right_confidence'))} [{data.get('right_method', '--')}]",
                     (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['right_dot'], 1)
     y += 25
     if 'gaze_x' in data:
-        cv2.putText(frame, f"Gaze: ({int(data['gaze_x'])},{int(data['gaze_y'])})",
+        cv2.putText(frame, f"Gaze: ({_fmt_int(data.get('gaze_x'))},{_fmt_int(data.get('gaze_y'))})",
                     (15, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, VIS_COLORS['mid'], 1)
     y += 25
     # Legend text (raw data always present, visual overlay conditional)

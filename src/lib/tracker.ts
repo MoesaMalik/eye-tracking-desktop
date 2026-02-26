@@ -6,6 +6,7 @@ export type TrackerStartOptions = {
   outDir?: string;
   script?: string;
   preview?: boolean;
+  videoPath?: string;
 };
 
 export type HeadPositionStatus = "NOT_DETECTED" | "ALIGNING" | "STABILIZING" | "READY";
@@ -77,6 +78,17 @@ export function subscribeTrackerExit(listener: (code: number) => void): () => vo
 export async function openTrackerOutput(): Promise<{ ok: boolean; path: string }> {
   if (window.tracker?.openOutput) return window.tracker.openOutput();
   return { ok: false, path: "" };
+}
+
+export async function pickTrackerVideo(): Promise<{
+  ok: boolean;
+  canceled?: boolean;
+  path?: string;
+  message?: string;
+}> {
+  if (window.nativeApi?.invoke) return window.nativeApi.invoke("tracking:pick-video");
+  if (window.ipcRenderer?.invoke) return window.ipcRenderer.invoke("tracking:pick-video");
+  return { ok: false, canceled: true, message: "IPC not available" };
 }
 
 export async function startHeadPosition(

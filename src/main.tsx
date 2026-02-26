@@ -10,6 +10,7 @@ import CalibrateCurrent from "./pages/CalibrateCurrent";
 import CalibrationResults from "./pages/CalibrationResults";
 import Validation from "./pages/Validation";
 import Results from "./pages/Results";
+import AnalyzeVideo from "./pages/AnalyzeVideo";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -23,6 +24,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <Route path="results" element={<Results />} />
           <Route path="calibrate" element={<CalibrateCurrent />} />
           <Route path="recorder" element={<Recorder />} />
+          <Route path="analyze-video" element={<AnalyzeVideo />} />
           <Route path="calibration-results" element={<CalibrationResults />} />
           <Route path="validation" element={<Validation />} />
           <Route path="*" element={<Navigate to="patients" replace />} />

@@ -2,6 +2,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   Menu,
   nativeImage,
   ipcMain,
@@ -198,7 +199,10 @@ ipcMain.handle("tracking:status", () => {
 
 ipcMain.handle(
   "tracking:start",
-  async (_e, opts: { cam?: number; outDir?: string; script?: string; preview?: boolean } = {}) => {
+  async (
+    _e,
+    opts: { cam?: number; outDir?: string; script?: string; preview?: boolean; videoPath?: string } = {}
+  ) => {
     if (trackerProc && !trackerProc.killed) {
       return { ok: true, message: "already running" };
     }
@@ -217,6 +221,9 @@ ipcMain.handle(
     }
     if (opts.outDir) {
       args.push("--output-dir", opts.outDir);
+    }
+    if (opts.videoPath) {
+      args.push("--video", opts.videoPath);
     }
 
     try {
@@ -251,6 +258,26 @@ ipcMain.handle(
   }
 );
 
+ipcMain.handle("tracking:pick-video", async () => {
+  if (!win) return { ok: false, canceled: true, message: "window unavailable" };
+  try {
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select MP4 Recording",
+      properties: ["openFile"],
+      filters: [
+        { name: "MP4 Video", extensions: ["mp4"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: true, canceled: true };
+    }
+    const selectedPath = result.filePaths[0];
+    return { ok: true, canceled: false, path: selectedPath };
+  } catch (err: any) {
+    return { ok: false, canceled: false, message: String(err?.message ?? err) };
+  }
+});
+
 ipcMain.handle("tracking:stop", async () => {
   if (!trackerProc || trackerProc.killed) {
     return { ok: true, message: "not running" };
@@ -265,7 +292,7 @@ ipcMain.handle("tracking:stop", async () => {
 });
 
 ipcMain.handle("tracking:open-output", async () => {
-  const outDir = path.join(process.env.APP_ROOT!, "output");
+  const outDir = path.join(process.env.APP_ROOT!, "recordings");
   try {
     await shell.openPath(outDir);
     return { ok: true, path: outDir };
