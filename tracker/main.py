@@ -153,6 +153,16 @@ class EyeTracker:
 
         self.last_left_center = None
         self.last_right_center = None
+        # Origins used to produce zero-based coordinates that start at (0,0)
+        # without changing existing absolute coordinate fields.
+        self.coord_origins = {
+            "left": None,
+            "right": None,
+            "gaze": None,
+            "left_raw": None,
+            "right_raw": None,
+            "gaze_raw": None,
+        }
         
         # Filters for smoothing (Lx, Ly, Rx, Ry)
         self.filter_lx = None
@@ -178,6 +188,26 @@ class EyeTracker:
                   file=sys.stderr)
         
         print(f"{'=' * 70}\n")
+
+    @staticmethod
+    def _is_finite_number(value):
+        return isinstance(value, (int, float, np.floating)) and math.isfinite(float(value))
+
+    def _set_zero_based_pair(self, frame_data, src_x_key, src_y_key, out_x_key, out_y_key, origin_key):
+        x = frame_data.get(src_x_key)
+        y = frame_data.get(src_y_key)
+        if not (self._is_finite_number(x) and self._is_finite_number(y)):
+            frame_data[out_x_key] = float("nan")
+            frame_data[out_y_key] = float("nan")
+            return
+
+        origin = self.coord_origins.get(origin_key)
+        if origin is None:
+            origin = (float(x), float(y))
+            self.coord_origins[origin_key] = origin
+
+        frame_data[out_x_key] = float(x) - origin[0]
+        frame_data[out_y_key] = float(y) - origin[1]
 
     def process_video(self):
         """
@@ -730,6 +760,57 @@ class EyeTracker:
             if head_result:
                 frame_data['head_status'] = head_result.get('status')
                 frame_data['head_progress'] = head_result.get('progress')
+
+            # Add zero-based coordinates that start from (0,0) at first valid sample.
+            # This is additive: existing absolute coordinates are unchanged.
+            self._set_zero_based_pair(
+                frame_data,
+                "left_center_x",
+                "left_center_y",
+                "left_center_x_from_start",
+                "left_center_y_from_start",
+                "left",
+            )
+            self._set_zero_based_pair(
+                frame_data,
+                "right_center_x",
+                "right_center_y",
+                "right_center_x_from_start",
+                "right_center_y_from_start",
+                "right",
+            )
+            self._set_zero_based_pair(
+                frame_data,
+                "gaze_x",
+                "gaze_y",
+                "gaze_x_from_start",
+                "gaze_y_from_start",
+                "gaze",
+            )
+            self._set_zero_based_pair(
+                frame_data,
+                "left_center_x_raw",
+                "left_center_y_raw",
+                "left_center_x_raw_from_start",
+                "left_center_y_raw_from_start",
+                "left_raw",
+            )
+            self._set_zero_based_pair(
+                frame_data,
+                "right_center_x_raw",
+                "right_center_y_raw",
+                "right_center_x_raw_from_start",
+                "right_center_y_raw_from_start",
+                "right_raw",
+            )
+            self._set_zero_based_pair(
+                frame_data,
+                "gaze_x_raw",
+                "gaze_y_raw",
+                "gaze_x_raw_from_start",
+                "gaze_y_raw_from_start",
+                "gaze_raw",
+            )
 
             draw_overlay(frame, frame_data, self.total_frames)
 
