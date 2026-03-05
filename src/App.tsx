@@ -63,7 +63,7 @@ export default function App() {
                 `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`
               }
             >
-              Analyze Video
+              Analyze Recording
             </NavLink>
           </nav>
         </div>

@@ -240,6 +240,363 @@ ipcMain.handle("tracking:open-output", async () => {
     return { ok: false, path: outDir };
   }
 });
+ipcMain.handle("excel:pick-file", async () => {
+  if (!win) return { ok: false, canceled: true, message: "window unavailable" };
+  try {
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select Excel File",
+      properties: ["openFile"],
+      filters: [
+        { name: "Excel Files", extensions: ["xlsx", "xls"] },
+        { name: "All Files", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: true, canceled: true };
+    }
+    const selectedPath = result.filePaths[0];
+    return { ok: true, canceled: false, path: selectedPath };
+  } catch (err) {
+    return { ok: false, canceled: false, message: String((err == null ? void 0 : err.message) ?? err) };
+  }
+});
+ipcMain.handle(
+  "excel:read",
+  async (_e, { filePath, sheetNumber, timeColumn }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_excel.py");
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(
+          python,
+          [scriptPath, "read", filePath, String(sheetNumber), String(timeColumn)],
+          {
+            cwd: process.env.APP_ROOT
+          }
+        );
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "excel:fit",
+  async (_e, {
+    time,
+    signal,
+    mode,
+    frameRate,
+    beforeLim,
+    afterLim
+  }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_excel.py");
+    try {
+      const inputData = JSON.stringify({
+        time,
+        signal,
+        mode,
+        frame_rate: frameRate,
+        before_lim: beforeLim,
+        after_lim: afterLim
+      });
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "fit", inputData], {
+          cwd: process.env.APP_ROOT
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "excel:save",
+  async (_e, { results, filePath, filename }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_excel.py");
+    try {
+      const inputData = JSON.stringify({
+        results,
+        file_path: filePath,
+        filename
+      });
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "save", inputData], {
+          cwd: process.env.APP_ROOT
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "recording:read",
+  async (_e, { sessionId, signalType }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
+    try {
+      const recDir = path.join(process.env.APP_ROOT, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "Tracking data file not found" };
+      }
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(
+          python,
+          [scriptPath, "read", trackingPath, signalType],
+          {
+            cwd: process.env.APP_ROOT
+          }
+        );
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "recording:detect-events",
+  async (_e, {
+    time,
+    signal,
+    beforeLim,
+    afterLim,
+    thresholdFactor,
+    minDistance
+  }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
+    try {
+      const inputData = JSON.stringify({
+        time,
+        signal,
+        before_lim: beforeLim,
+        after_lim: afterLim,
+        threshold_factor: thresholdFactor ?? 2,
+        min_distance: minDistance ?? 30
+      });
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "detect", inputData], {
+          cwd: process.env.APP_ROOT
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "recording:fit",
+  async (_e, {
+    time,
+    signal,
+    eventTimes,
+    beforeLim,
+    afterLim
+  }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
+    try {
+      const inputData = JSON.stringify({
+        time,
+        signal,
+        event_times: eventTimes,
+        before_lim: beforeLim,
+        after_lim: afterLim
+      });
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "fit", inputData], {
+          cwd: process.env.APP_ROOT
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "recording:save",
+  async (_e, { results, filePath, sessionId }) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
+    try {
+      const inputData = JSON.stringify({
+        results,
+        file_path: filePath,
+        session_id: sessionId
+      });
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "save", inputData], {
+          cwd: process.env.APP_ROOT
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+        proc.on("error", reject);
+      });
+      return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
 function stopHeadPositionProcess() {
   if (headPositionProc && !headPositionProc.killed) {
     try {
