@@ -2,12 +2,15 @@ import { useEffect, useState, useMemo } from "react";
 import {
   listSessions,
   readSessionTracking,
-  detectAndFitEvents,
+  readSessionTransitions,
+  detectStimuliAndFit,
   fitRecordingData,
   saveRecordingResults,
   getRecordingPath,
   type FitResult,
   type SessionInfo,
+  type StimuliInfo,
+  type TransitionInfo,
 } from "../lib/recording-analysis";
 import {
   LineChart,
@@ -18,9 +21,11 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  ReferenceArea,
 } from "recharts";
 
 const SIGNAL_TYPES = [
+  { value: "gaze_xy", label: "Gaze XY (Magnitude)" },
   { value: "gaze_x", label: "Gaze X (Horizontal)" },
   { value: "gaze_y", label: "Gaze Y (Vertical)" },
   { value: "left_x", label: "Left Eye X" },
@@ -33,25 +38,29 @@ export default function AnalyzeVideo() {
   // Session and data state
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
-  const [signalType, setSignalType] = useState<string>("gaze_x");
+  const [signalType, setSignalType] = useState<string>("gaze_xy");
   const [timeData, setTimeData] = useState<number[]>([]);
   const [signalData, setSignalData] = useState<number[]>([]);
   const [signalName, setSignalName] = useState<string>("");
+  const [loadedFilePath, setLoadedFilePath] = useState<string>("");
+  const [eventsFilePath, setEventsFilePath] = useState<string>("");
 
   // Analysis parameters
   const [tMin, setTMin] = useState<number>(0);
   const [tMax, setTMax] = useState<number>(60);
   const [beforeLim, setBeforeLim] = useState<number>(0.5);
   const [afterLim, setAfterLim] = useState<number>(1.0);
-  const [thresholdFactor, setThresholdFactor] = useState<number>(2.0);
-  const [minDistance, setMinDistance] = useState<number>(30);
 
   // Event detection state
   const [eventTimes, setEventTimes] = useState<number[]>([]);
+  const [stimuliInfo, setStimuliInfo] = useState<StimuliInfo[]>([]);
   const [manualEventInput, setManualEventInput] = useState<string>("");
 
   // Results state
   const [fitResults, setFitResults] = useState<FitResult[]>([]);
+
+  // Transition timeline state
+  const [transitions, setTransitions] = useState<TransitionInfo[]>([]);
 
   // UI state
   const [loading, setLoading] = useState<boolean>(false);
@@ -95,6 +104,28 @@ export default function AnalyzeVideo() {
     };
   }, [mainChartData]);
 
+  // Color palette for transition bands (stronger opacity)
+  const TRANSITION_COLORS = [
+    "rgba(59, 130, 246, 0.18)",   // blue
+    "rgba(16, 185, 129, 0.18)",   // green
+    "rgba(245, 158, 11, 0.18)",   // amber
+    "rgba(139, 92, 246, 0.18)",   // purple
+    "rgba(236, 72, 153, 0.18)",   // pink
+    "rgba(6, 182, 212, 0.18)",    // cyan
+    "rgba(239, 68, 68, 0.18)",    // red
+    "rgba(34, 197, 94, 0.18)",    // emerald
+  ];
+
+  // Build a unique-name → color map for transition bands
+  const transitionColorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    const uniqueNames = [...new Set(transitions.map((t) => t.name))];
+    uniqueNames.forEach((name, i) => {
+      map.set(name, TRANSITION_COLORS[i % TRANSITION_COLORS.length]);
+    });
+    return map;
+  }, [transitions]);
+
   async function handleLoadData() {
     if (!selectedSessionId) {
       setError("No session selected");
@@ -127,6 +158,7 @@ export default function AnalyzeVideo() {
         setSignalData(result.data.signal);
         setSignalName(result.data.signal_name);
         setTMax(result.data.max_time);
+        setLoadedFilePath(result.filePath || "unknown");
         setMessage(
           `Loaded ${result.data.num_valid} valid points from ${result.data.num_frames} frames`
         );
@@ -138,9 +170,9 @@ export default function AnalyzeVideo() {
     }
   }
 
-  async function handleDetectEvents() {
-    if (!timeData.length || !signalData.length) {
-      setError("No data loaded. Please load session data first.");
+  async function handleAutoFitEvents() {
+    if (!selectedSessionId) {
+      setError("No session selected");
       return;
     }
 
@@ -149,17 +181,15 @@ export default function AnalyzeVideo() {
     setMessage(null);
 
     try {
-      const result = await detectAndFitEvents({
-        time: timeData,
-        signal: signalData,
+      const result = await detectStimuliAndFit({
+        sessionId: selectedSessionId,
+        signalType,
         beforeLim,
         afterLim,
-        thresholdFactor,
-        minDistance,
       });
 
       if (!result.ok) {
-        setError(result.message ?? "Failed to detect events");
+        setError(result.message ?? "Failed to detect stimuli changes");
         setLoading(false);
         return;
       }
@@ -172,10 +202,16 @@ export default function AnalyzeVideo() {
 
       if (result.data) {
         setEventTimes(result.data.event_times);
+        setStimuliInfo(result.data.stimuli_info);
         setFitResults(result.data.fit_results);
+        setEventsFilePath(result.filePath || "unknown");
         const successCount = result.data.fit_results.filter((r) => !r.error).length;
+        const fileMatch = result.filePath === loadedFilePath;
+        const debugInfo = result.data.debug_info;
         setMessage(
-          `Detected ${result.data.num_events} events, fitted ${successCount} successfully`
+          `Detected ${result.data.num_events} visual stimuli changes, fitted ${successCount} successfully` +
+          (fileMatch ? " ✓" : ` ⚠️ File mismatch!`) +
+          (debugInfo ? ` | ${debugInfo.total_frames} frames, ${debugInfo.num_unique_stimuli} unique stimuli` : "")
         );
       }
     } catch (err) {
@@ -286,13 +322,33 @@ export default function AnalyzeVideo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSessionId, signalType]);
 
+  // Auto-load transitions when session changes
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setTransitions([]);
+      return;
+    }
+    (async () => {
+      try {
+        const result = await readSessionTransitions(selectedSessionId);
+        if (result.ok && result.data) {
+          setTransitions(result.data.transitions);
+        } else {
+          setTransitions([]);
+        }
+      } catch {
+        setTransitions([]);
+      }
+    })();
+  }, [selectedSessionId]);
+
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold">Analyze Recording Data</h1>
         <p className="text-sm text-gray-600">
-          Load tracking data from recorded sessions, detect eye movement events, fit exponential curves, and extract
-          parameters.
+          Load tracking data from recorded sessions, detect visual stimuli changes automatically, fit exponential curves
+          to eye movements at stimulus transitions, and extract parameters.
         </p>
       </div>
 
@@ -321,10 +377,10 @@ export default function AnalyzeVideo() {
           </button>
           <button
             className="px-3 py-1.5 rounded border bg-blue-500 text-white disabled:opacity-50"
-            onClick={handleDetectEvents}
-            disabled={loading || !timeData.length}
+            onClick={handleAutoFitEvents}
+            disabled={loading || !selectedSessionId}
           >
-            {loading ? "Detecting..." : "Auto-Detect Events"}
+            {loading ? "Fitting..." : "Auto-Fit Events"}
           </button>
           <button
             className="px-3 py-1.5 rounded border bg-green-500 text-white disabled:opacity-50"
@@ -339,8 +395,15 @@ export default function AnalyzeVideo() {
           <div className="rounded border bg-gray-50 p-3">
             <div className="text-xs uppercase tracking-wide text-gray-500">Selected Session</div>
             <div className="mt-1 text-sm font-medium">{selectedSessionId || "No session selected"}</div>
-            {selectedSessionId && (
-              <div className="mt-1 text-xs text-gray-500">{getRecordingPath(selectedSessionId)}</div>
+            {loadedFilePath && (
+              <div className="mt-1 text-xs text-gray-500 font-mono break-all">
+                Data: {loadedFilePath}
+              </div>
+            )}
+            {eventsFilePath && eventsFilePath !== loadedFilePath && (
+              <div className="mt-1 text-xs text-red-500 font-mono break-all">
+                Events: {eventsFilePath} ⚠️ MISMATCH
+              </div>
             )}
           </div>
           <div className="rounded border bg-gray-50 p-3">
@@ -358,7 +421,7 @@ export default function AnalyzeVideo() {
         </div>
 
         {/* Parameter Controls */}
-        <div className="grid gap-2 md:grid-cols-3 lg:grid-cols-6">
+        <div className="grid gap-2 md:grid-cols-3 lg:grid-cols-5">
           <div>
             <label className="text-xs text-gray-600">Signal Type</label>
             <select
@@ -418,16 +481,6 @@ export default function AnalyzeVideo() {
               step={0.1}
             />
           </div>
-          <div>
-            <label className="text-xs text-gray-600">Threshold</label>
-            <input
-              type="number"
-              className="w-full px-2 py-1 text-sm border rounded"
-              value={thresholdFactor}
-              onChange={(e) => setThresholdFactor(Number(e.target.value))}
-              step={0.1}
-            />
-          </div>
         </div>
 
         {/* Manual Event Input */}
@@ -467,22 +520,116 @@ export default function AnalyzeVideo() {
               <span className="ml-2 text-xs text-gray-500">({eventTimes.length} detected events)</span>
             )}
           </div>
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height={400}>
             <LineChart data={mainChartData}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
                 dataKey="time"
                 label={{ value: "Time (s)", position: "insideBottom", offset: -5 }}
                 domain={[tMin, tMax]}
+                tickFormatter={(v: number) => v.toFixed(1)}
               />
-              <YAxis label={{ value: "Signal", angle: -90, position: "insideLeft" }} domain={[yRange.min, yRange.max]} />
-              <Tooltip />
-              <Line type="monotone" dataKey="signal" stroke="#2563eb" dot={false} strokeWidth={1} />
+              <YAxis
+                label={{ value: "Signal", angle: -90, position: "insideLeft" }}
+                domain={[yRange.min, yRange.max]}
+                tickFormatter={(v: number) => v.toFixed(0)}
+              />
+              <Tooltip formatter={(value: number) => value.toFixed(2)} />
+              {transitions
+                .filter((t) => t.endTime >= tMin && t.startTime <= tMax)
+                .map((t, idx) => (
+                  <ReferenceArea
+                    key={`band-${idx}`}
+                    x1={Math.max(t.startTime, tMin)}
+                    x2={Math.min(t.endTime, tMax)}
+                    fill={transitionColorMap.get(t.name) || "rgba(0,0,0,0.05)"}
+                    fillOpacity={1}
+                  />
+                ))}
+              <Line type="monotone" dataKey="signal" stroke="#2563eb" dot={false} strokeWidth={1.5} />
               {eventTimes.map((eventTime, idx) => (
                 <ReferenceLine key={idx} x={eventTime} stroke="#dc2626" strokeWidth={2} strokeDasharray="3 3" />
               ))}
             </LineChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Stimuli Timeline */}
+      {transitions.length > 0 && (
+        <div className="rounded-lg border bg-white">
+          <div className="px-3 py-2 border-b text-sm font-medium">
+            Stimuli Timeline
+            <span className="ml-2 text-xs text-gray-500">({transitions.length} segments)</span>
+          </div>
+          <div className="p-3 max-h-[350px] overflow-auto">
+            <table className="min-w-full text-xs border">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-2 py-1 border text-left">#</th>
+                  <th className="px-2 py-1 border text-left">Stimulus</th>
+                  <th className="px-2 py-1 border text-right">Start Time (s)</th>
+                  <th className="px-2 py-1 border text-right">End Time (s)</th>
+                  <th className="px-2 py-1 border text-right">Duration (s)</th>
+                  <th className="px-2 py-1 border text-right">Frames</th>
+                  <th className="px-2 py-1 border text-center">Color</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transitions.map((t, idx) => (
+                  <tr key={idx}>
+                    <td className="px-2 py-1 border">{idx + 1}</td>
+                    <td className="px-2 py-1 border text-left font-mono text-xs">{t.name}</td>
+                    <td className="px-2 py-1 border text-right">{t.startTime.toFixed(3)}</td>
+                    <td className="px-2 py-1 border text-right">{t.endTime.toFixed(3)}</td>
+                    <td className="px-2 py-1 border text-right font-semibold">{t.duration.toFixed(3)}</td>
+                    <td className="px-2 py-1 border text-right">{t.startFrame}–{t.endFrame}</td>
+                    <td className="px-2 py-1 border text-center">
+                      <span
+                        className="inline-block w-4 h-4 rounded"
+                        style={{ backgroundColor: (transitionColorMap.get(t.name) || "#eee").replace(/0\.10\)/, "0.4)") }}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Visual Stimuli Changes (from Auto-Fit) */}
+      {stimuliInfo.length > 0 && (
+        <div className="rounded-lg border bg-white">
+          <div className="px-3 py-2 border-b text-sm font-medium">Visual Stimuli Changes (Detected)</div>
+          <div className="p-3 max-h-[300px] overflow-auto">
+            <table className="min-w-full text-xs border">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-2 py-1 border text-left">#</th>
+                  <th className="px-2 py-1 border text-right">Frame</th>
+                  <th className="px-2 py-1 border text-right">Time (s)</th>
+                  <th className="px-2 py-1 border text-left">From</th>
+                  <th className="px-2 py-1 border text-left">To</th>
+                  <th className="px-2 py-1 border text-right">Slide Change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stimuliInfo.map((info, idx) => (
+                  <tr key={idx}>
+                    <td className="px-2 py-1 border">{idx + 1}</td>
+                    <td className="px-2 py-1 border text-right">{info.frame}</td>
+                    <td className="px-2 py-1 border text-right">{info.time.toFixed(3)}</td>
+                    <td className="px-2 py-1 border text-left font-mono text-xs">{info.from_frame || info.from_filename}</td>
+                    <td className="px-2 py-1 border text-left font-mono text-xs">{info.to_frame || info.to_filename}</td>
+                    <td className="px-2 py-1 border text-right">
+                      {info.from_slide} → {info.to_slide}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

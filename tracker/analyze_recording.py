@@ -33,37 +33,81 @@ def calculate_fit_error(t, signal, lim_before, lim_after):
     return float(np.mean(np.abs(signal_segment)))
 
 
-def detect_events(signal, time, threshold_factor=2.0, min_distance=30):
+def detect_stimuli_changes(frames):
     """
-    Detect eye movement events (saccades) in the signal using peak detection.
+    Detect visual stimuli changes in the recording.
+    Goes through EVERY frame to ensure ALL changes are detected.
 
     Args:
-        signal: Signal array
-        time: Time array
-        threshold_factor: Multiplier for std to set peak detection threshold
-        min_distance: Minimum distance between peaks (in frames)
+        frames: List of tracking frame dictionaries
 
     Returns:
-        List of event times (in seconds)
+        dict with event_times, event_frames, and stimuli_info
     """
-    # Calculate velocity (first derivative)
-    velocity = np.diff(signal)
-    velocity = np.concatenate([[0], velocity])  # Pad to match length
+    event_times = []
+    event_frames = []
+    stimuli_info = []
 
-    # Calculate threshold based on velocity std
-    threshold = threshold_factor * np.std(np.abs(velocity))
+    prev_current_frame = None
+    prev_slide_index = None
 
-    # Find peaks in absolute velocity
-    peaks, properties = find_peaks(
-        np.abs(velocity),
-        height=threshold,
-        distance=min_distance
-    )
+    # Debug: Track all unique current_frame values seen
+    unique_frames = set()
 
-    # Return peak times
-    event_times = time[peaks] if len(peaks) > 0 else np.array([])
+    for i, frame in enumerate(frames):
+        frame_num = frame.get('frame')
+        timestamp = frame.get('timestamp_sec')
+        current_frame = frame.get('current_frame') or frame.get('filename')  # fallback for old data
+        slide_index = frame.get('slide_index')
 
-    return event_times.tolist()
+        # Track unique current_frame values
+        if current_frame is not None:
+            unique_frames.add(current_frame)
+
+        # Detect change in visual stimuli (check if current_frame changed)
+        # Handle None values carefully - a change from None to something, or something to None, is also a change
+        has_changed = False
+
+        if i > 0:  # Not the first frame
+            # Change detected if current_frame values are different (including None transitions)
+            if prev_current_frame != current_frame:
+                has_changed = True
+
+        if has_changed and frame_num is not None and timestamp is not None:
+            event_times.append(timestamp)
+            event_frames.append(frame_num)
+            stimuli_info.append({
+                'frame': frame_num,
+                'time': timestamp,
+                'from_frame': prev_current_frame if prev_current_frame is not None else 'None',
+                'to_frame': current_frame if current_frame is not None else 'None',
+                'from_filename': prev_current_frame if prev_current_frame is not None else 'None',
+                'to_filename': current_frame if current_frame is not None else 'None',
+                'from_slide': prev_slide_index if prev_slide_index is not None else -1,
+                'to_slide': slide_index if slide_index is not None else -1
+            })
+
+        # Always update previous values
+        prev_current_frame = current_frame
+        prev_slide_index = slide_index
+
+    # Debug logging to stderr (won't interfere with JSON output)
+    import sys
+    print(f"DEBUG: Processed {len(frames)} frames", file=sys.stderr)
+    print(f"DEBUG: Found {len(unique_frames)} unique stimuli: {sorted(unique_frames)}", file=sys.stderr)
+    print(f"DEBUG: Detected {len(event_times)} stimuli changes", file=sys.stderr)
+
+    return {
+        'event_times': event_times,
+        'event_frames': event_frames,
+        'stimuli_info': stimuli_info,
+        'num_changes': len(event_times),
+        'debug_info': {
+            'total_frames': len(frames),
+            'unique_stimuli': list(sorted(unique_frames)),
+            'num_unique_stimuli': len(unique_frames)
+        }
+    }
 
 
 def extract_signal_from_tracking(frames, signal_type='gaze_x'):
@@ -74,6 +118,7 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
         frames: List of tracking frame dictionaries
         signal_type: Type of signal to extract. Options:
             - 'gaze_x', 'gaze_y': Gaze position (average of left and right eyes)
+            - 'gaze_xy': Combined gaze magnitude (sqrt(x^2 + y^2))
             - 'left_x', 'left_y': Left eye position
             - 'right_x', 'right_y': Right eye position
             - 'left_mp_x', 'left_mp_y': Left eye midpoint
@@ -113,6 +158,36 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
                 value = right_y
             else:
                 continue
+        elif signal_type == 'gaze_xy':
+            # Combined X and Y gaze - magnitude from origin
+            left_x = frame.get('left_mp_x')
+            right_x = frame.get('right_mp_x')
+            left_y = frame.get('left_mp_y')
+            right_y = frame.get('right_mp_y')
+
+            # Calculate average gaze X and Y
+            gaze_x = None
+            gaze_y = None
+
+            if left_x is not None and right_x is not None:
+                gaze_x = (left_x + right_x) / 2
+            elif left_x is not None:
+                gaze_x = left_x
+            elif right_x is not None:
+                gaze_x = right_x
+
+            if left_y is not None and right_y is not None:
+                gaze_y = (left_y + right_y) / 2
+            elif left_y is not None:
+                gaze_y = left_y
+            elif right_y is not None:
+                gaze_y = right_y
+
+            if gaze_x is None or gaze_y is None:
+                continue
+
+            # Calculate magnitude: sqrt(x^2 + y^2)
+            value = np.sqrt(gaze_x**2 + gaze_y**2)
         elif signal_type == 'left_x':
             value = frame.get('left_mp_x')
         elif signal_type == 'left_y':
@@ -141,6 +216,7 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
     signal_names = {
         'gaze_x': 'Gaze X (horizontal)',
         'gaze_y': 'Gaze Y (vertical)',
+        'gaze_xy': 'Gaze XY (magnitude)',
         'left_x': 'Left Eye X',
         'left_y': 'Left Eye Y',
         'right_x': 'Right Eye X',
@@ -274,38 +350,56 @@ def fit_parameters(time, signal, event_times, before_lim, after_lim):
         return {"error": str(e)}
 
 
-def auto_detect_and_fit(time, signal, before_lim, after_lim, threshold_factor=2.0, min_distance=30):
+def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim):
     """
-    Automatically detect events and fit parameters.
+    Detect visual stimuli changes and fit parameters to the signal.
 
     Args:
-        time: Time array
-        signal: Signal array
+        file_path: Path to tracking JSON file
+        signal_type: Type of signal to extract and fit
         before_lim: Time before event to include
         after_lim: Time after event to include
-        threshold_factor: Peak detection threshold multiplier
-        min_distance: Minimum distance between peaks (frames)
 
     Returns:
-        dict with detected events and fit results
+        dict with detected stimuli changes, fit results, and stimuli info
     """
     try:
-        t = np.array(time)
-        x = np.array(signal)
+        # Read the tracking data
+        with open(file_path, 'r') as f:
+            data = json.load(f)
 
-        # Detect events
-        event_times = detect_events(x, t, threshold_factor, min_distance)
+        frames = data.get('frames', [])
+        if not frames:
+            return {"error": "No frames found in tracking data"}
 
-        if len(event_times) == 0:
-            return {"error": "No events detected in signal"}
+        # Detect stimuli changes
+        stimuli_result = detect_stimuli_changes(frames)
 
-        # Fit parameters
-        fit_result = fit_parameters(time, signal, event_times, before_lim, after_lim)
+        if stimuli_result['num_changes'] == 0:
+            return {"error": "No visual stimuli changes detected"}
+
+        # Extract signal
+        time, signal, signal_name = extract_signal_from_tracking(frames, signal_type)
+
+        if len(time) == 0:
+            return {"error": f"No valid {signal_type} data found"}
+
+        # Fit parameters to events
+        fit_result = fit_parameters(
+            time.tolist(),
+            signal.tolist(),
+            stimuli_result['event_times'],
+            before_lim,
+            after_lim
+        )
 
         return {
-            "event_times": event_times,
-            "num_events": len(event_times),
+            "event_times": stimuli_result['event_times'],
+            "event_frames": stimuli_result['event_frames'],
+            "num_events": stimuli_result['num_changes'],
+            "stimuli_info": stimuli_result['stimuli_info'],
             "fit_results": fit_result.get("results", []),
+            "signal_name": signal_name,
             "error": fit_result.get("error")
         }
 
@@ -355,17 +449,15 @@ def main():
             result = read_tracking_data(file_path, signal_type)
             print(json.dumps(result))
 
-        elif command == "detect":
-            # Auto-detect events: python analyze_recording.py detect <json_data>
+        elif command == "detect-stimuli":
+            # Detect stimuli changes and fit: python analyze_recording.py detect-stimuli <json_data>
             data = json.loads(sys.argv[2])
 
-            result = auto_detect_and_fit(
-                data["time"],
-                data["signal"],
+            result = detect_stimuli_and_fit(
+                data["file_path"],
+                data["signal_type"],
                 data["before_lim"],
-                data["after_lim"],
-                data.get("threshold_factor", 2.0),
-                data.get("min_distance", 30)
+                data["after_lim"]
             )
             print(json.dumps(result))
 

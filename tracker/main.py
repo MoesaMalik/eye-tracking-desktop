@@ -911,7 +911,7 @@ class EyeTracker:
                 idx += 1
             if ts >= first_t:
                 current = normalized[idx]
-                frame["filename"] = current["filename"]
+                frame["current_frame"] = current["filename"]
                 if current.get("protocol_key") is not None:
                     frame["protocol_key"] = current["protocol_key"]
                 if current.get("slide_index") is not None:

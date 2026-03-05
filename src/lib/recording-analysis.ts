@@ -20,6 +20,7 @@ export interface RecordingReadResult {
     num_valid: number;
     error?: string;
   };
+  filePath?: string;
   message?: string;
 }
 
@@ -39,14 +40,52 @@ export interface FitResult {
   error?: string;
 }
 
-export interface RecordingDetectResult {
+export interface StimuliInfo {
+  frame: number;
+  time: number;
+  from_frame: string;
+  to_frame: string;
+  from_filename: string;
+  to_filename: string;
+  from_slide: number;
+  to_slide: number;
+}
+
+export interface TransitionInfo {
+  name: string;
+  startFrame: number;
+  startTime: number;
+  endFrame: number;
+  endTime: number;
+  duration: number;
+}
+
+export interface TransitionsResult {
+  ok: boolean;
+  data?: {
+    transitions: TransitionInfo[];
+    totalFrames: number;
+  };
+  message?: string;
+}
+
+export interface RecordingDetectStimuliResult {
   ok: boolean;
   data?: {
     event_times: number[];
+    event_frames: number[];
     num_events: number;
+    stimuli_info: StimuliInfo[];
     fit_results: FitResult[];
+    signal_name: string;
+    debug_info?: {
+      total_frames: number;
+      unique_stimuli: string[];
+      num_unique_stimuli: number;
+    };
     error?: string;
   };
+  filePath?: string;
   message?: string;
 }
 
@@ -132,19 +171,17 @@ export async function readRecordingData(
 }
 
 /**
- * Auto-detect events and fit parameters
+ * Detect visual stimuli changes and fit parameters
  */
-export async function detectAndFitEvents(params: {
-  time: number[];
-  signal: number[];
+export async function detectStimuliAndFit(params: {
+  sessionId: string;
+  signalType: string;
   beforeLim: number;
   afterLim: number;
-  thresholdFactor?: number;
-  minDistance?: number;
-}): Promise<RecordingDetectResult> {
+}): Promise<RecordingDetectStimuliResult> {
   try {
-    const result = await invokeIpc("recording:detect-events", params);
-    return result as RecordingDetectResult;
+    const result = await invokeIpc("recording:detect-stimuli", params);
+    return result as RecordingDetectStimuliResult;
   } catch (error) {
     return {
       ok: false,
@@ -199,4 +236,21 @@ export async function saveRecordingResults(params: {
 export function getRecordingPath(sessionId: string, filename: string = "recording_tracking_data.json"): string {
   // This will be resolved on the main process side
   return `recordings/${sessionId}/${filename}`;
+}
+
+/**
+ * Read stimuli transitions from a session's tracking data
+ */
+export async function readSessionTransitions(
+  sessionId: string
+): Promise<TransitionsResult> {
+  try {
+    const result = await invokeIpc("recording:read-transitions", { sessionId });
+    return result as TransitionsResult;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

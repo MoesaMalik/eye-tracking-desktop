@@ -444,35 +444,41 @@ ipcMain.handle(
         });
         proc.on("error", reject);
       });
-      return { ok: true, data: result };
+      return { ok: true, data: result, filePath: trackingPath };
     } catch (err) {
       return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
     }
   }
 );
 ipcMain.handle(
-  "recording:detect-events",
+  "recording:detect-stimuli",
   async (_e, {
-    time,
-    signal,
+    sessionId,
+    signalType,
     beforeLim,
-    afterLim,
-    thresholdFactor,
-    minDistance
+    afterLim
   }) => {
     const python = resolvePython();
     const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
     try {
+      const recDir = path.join(process.env.APP_ROOT, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "Tracking data file not found" };
+      }
       const inputData = JSON.stringify({
-        time,
-        signal,
+        file_path: trackingPath,
+        signal_type: signalType,
         before_lim: beforeLim,
-        after_lim: afterLim,
-        threshold_factor: thresholdFactor ?? 2,
-        min_distance: minDistance ?? 30
+        after_lim: afterLim
       });
       const result = await new Promise((resolve, reject) => {
-        const proc = spawn(python, [scriptPath, "detect", inputData], {
+        const proc = spawn(python, [scriptPath, "detect-stimuli", inputData], {
           cwd: process.env.APP_ROOT
         });
         let stdout = "";
@@ -497,7 +503,7 @@ ipcMain.handle(
         });
         proc.on("error", reject);
       });
-      return { ok: true, data: result };
+      return { ok: true, data: result, filePath: trackingPath };
     } catch (err) {
       return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
     }
@@ -592,6 +598,62 @@ ipcMain.handle(
         proc.on("error", reject);
       });
       return { ok: true, data: result };
+    } catch (err) {
+      return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
+    }
+  }
+);
+ipcMain.handle(
+  "recording:read-transitions",
+  async (_e, { sessionId }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "Tracking data file not found" };
+      }
+      const raw = fs.readFileSync(trackingPath, "utf-8");
+      const data = parseJsonWithNaN(raw);
+      const frames = (data == null ? void 0 : data.frames) ?? [];
+      const transitions = [];
+      let currentName = null;
+      for (const frame of frames) {
+        const frameName = frame.current_frame ?? frame.filename ?? null;
+        const frameNum = frame.frame ?? 0;
+        const timestamp = frame.timestamp_sec ?? 0;
+        if (frameName !== currentName) {
+          if (currentName !== null && transitions.length > 0) {
+            const last = transitions[transitions.length - 1];
+            last.endFrame = frameNum > 0 ? frameNum - 1 : 0;
+            last.endTime = timestamp;
+            last.duration = last.endTime - last.startTime;
+          }
+          if (frameName !== null) {
+            transitions.push({
+              name: frameName,
+              startFrame: frameNum,
+              startTime: timestamp,
+              endFrame: frameNum,
+              endTime: timestamp,
+              duration: 0
+            });
+          }
+          currentName = frameName;
+        }
+      }
+      if (transitions.length > 0 && frames.length > 0) {
+        const lastFrame = frames[frames.length - 1];
+        const last = transitions[transitions.length - 1];
+        last.endFrame = lastFrame.frame ?? last.endFrame;
+        last.endTime = lastFrame.timestamp_sec ?? last.endTime;
+        last.duration = last.endTime - last.startTime;
+      }
+      return { ok: true, data: { transitions, totalFrames: frames.length } };
     } catch (err) {
       return { ok: false, message: String((err == null ? void 0 : err.message) ?? err) };
     }
