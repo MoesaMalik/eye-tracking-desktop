@@ -105,7 +105,7 @@ function parseJsonWithNaN(raw: string) {
 
 function findLatestTrackingDataFile(rootDir: string) {
   // Recursively searches for recording_tracking_data.json (or any file ending with _tracking_data.json)
-  // This file contains frame-by-frame data: timestamp_sec, gaze_x_raw, gaze_y_raw, current_frame
+  // This file contains frame-by-frame data: timestamp_sec, gaze_x, gaze_y (OneEuroFilter smoothed), current_frame
   if (!fs.existsSync(rootDir)) return null;
   let latestPath: string | null = null;
   let latestMtime = 0;
@@ -512,7 +512,7 @@ ipcMain.handle(
   "recording:read",
   async (
     _e,
-    { sessionId, signalType }: { sessionId: string; signalType: string }
+    { sessionId, signalType, filterLevel }: { sessionId: string; signalType: string; filterLevel?: string }
   ) => {
     const python = resolvePython();
     const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
@@ -532,10 +532,12 @@ ipcMain.handle(
         return { ok: false, message: "Tracking data file not found" };
       }
 
+      const filter = filterLevel || 'low';  // Default to 'low' if not specified
+
       const result = await new Promise((resolve, reject) => {
         const proc = spawn(
           python,
-          [scriptPath, "read", trackingPath, signalType],
+          [scriptPath, "read", trackingPath, signalType, filter],
           {
             cwd: process.env.APP_ROOT!,
           }
@@ -584,11 +586,13 @@ ipcMain.handle(
       signalType,
       beforeLim,
       afterLim,
+      filterLevel,
     }: {
       sessionId: string;
       signalType: string;
       beforeLim: number;
       afterLim: number;
+      filterLevel?: string;
     }
   ) => {
     const python = resolvePython();
@@ -598,7 +602,7 @@ ipcMain.handle(
       // Find recording_tracking_data.json file which contains:
       // - timestamp_sec: timestamps for each frame
       // - current_frame: stimulus name (for detecting changes)
-      // - gaze_x_raw, gaze_y_raw: raw gaze coordinates
+      // - gaze_x_raw, gaze_y_raw: raw gaze coordinates (filtered based on filterLevel)
       const recDir = path.join(process.env.APP_ROOT!, "recordings");
       const safeSession = safePathSegment(sessionId);
       const sessionPath = path.join(recDir, safeSession);
@@ -617,6 +621,7 @@ ipcMain.handle(
         signal_type: signalType,
         before_lim: beforeLim,
         after_lim: afterLim,
+        filter_level: filterLevel || 'low',
       });
 
       const result = await new Promise((resolve, reject) => {
@@ -1276,6 +1281,53 @@ ipcMain.handle("session:write-json", async (_e, { filePath, data }: { filePath: 
     fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
     fs.writeFileSync(resolvedPath, JSON.stringify(data, null, 2));
     return { ok: true, path: resolvedPath };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+});
+
+ipcMain.handle("session:get-video-path", async (_e, { sessionId }: { sessionId: string }) => {
+  try {
+    const recDir = path.join(process.env.APP_ROOT!, "recordings");
+    const safeSession = safePathSegment(sessionId);
+    const sessionPath = path.join(recDir, safeSession);
+
+    if (!fs.existsSync(sessionPath)) {
+      return { ok: false, error: "Session folder not found" };
+    }
+
+    // Look for video files recursively (session might be in nested subfolder)
+    // Prefer tracked video for visualization, fall back to original
+    const findVideoFile = (dir: string): string | null => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let trackedVideo: string | null = null;
+      let originalVideo: string | null = null;
+
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const found = findVideoFile(fullPath);
+          if (found) return found;
+        } else if (entry.isFile() && entry.name.endsWith(".mp4")) {
+          if (entry.name.includes("_tracked")) {
+            // Prefer tracked video (has ROI overlays)
+            trackedVideo = fullPath;
+          } else if (!originalVideo) {
+            // Save original video as fallback
+            originalVideo = fullPath;
+          }
+        }
+      }
+      // Return tracked video if available, otherwise original
+      return trackedVideo || originalVideo;
+    };
+
+    const videoPath = findVideoFile(sessionPath);
+    if (!videoPath) {
+      return { ok: false, error: "Video file not found" };
+    }
+
+    return { ok: true, path: videoPath };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }

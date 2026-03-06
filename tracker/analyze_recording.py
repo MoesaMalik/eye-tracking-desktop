@@ -10,6 +10,20 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from pathlib import Path
 
+# Import OneEuroFilter for applying different smoothing levels
+try:
+    from .filter import OneEuroFilter
+except (ImportError, ValueError):
+    from filter import OneEuroFilter
+
+# OneEuroFilter Smoothing Presets
+SMOOTHING_PRESETS = {
+    'raw': None,  # No filtering
+    'low': {'min_cutoff': 1.0, 'beta': 0.02},  # Minimal smoothing, very responsive
+    'med': {'min_cutoff': 0.5, 'beta': 0.01},  # Balanced
+    'high': {'min_cutoff': 0.1, 'beta': 0.005},  # Heavy smoothing
+}
+
 
 def exponential_fit_function(t, a, b, tau, d):
     """
@@ -42,7 +56,7 @@ def detect_stimuli_changes(frames):
 
     Args:
         frames: List of tracking frame dictionaries from recording_tracking_data.json
-                Each frame contains: timestamp_sec, current_frame (stimulus), gaze_x_raw, gaze_y_raw
+                Each frame contains: timestamp_sec, current_frame (stimulus), gaze_x, gaze_y (OneEuroFilter smoothed)
 
     Returns:
         dict with event_times (from timestamp_sec), event_frames, and stimuli_info
@@ -124,33 +138,42 @@ def detect_stimuli_changes(frames):
     }
 
 
-def extract_signal_from_tracking(frames, signal_type='gaze_x'):
+def extract_signal_from_tracking(frames, signal_type='gaze_x', filter_level='low'):
     """
     Extract a signal from recording_tracking_data.json frames.
+    Handles blinks by holding the last good gaze value during blink events.
 
     Args:
         frames: List of tracking frame dictionaries from recording_tracking_data.json
         signal_type: Type of signal to extract. Options:
-            - 'gaze_x', 'gaze_y': Gaze position from gaze_x_raw, gaze_y_raw
-            - 'gaze_xy': Combined gaze magnitude from raw values (sqrt(x^2 + y^2))
+            - 'gaze_x', 'gaze_y': Gaze position (will be filtered based on filter_level)
+            - 'gaze_xy': Combined gaze magnitude (sqrt(x^2 + y^2))
             - 'left_x', 'left_y': Left eye position (left_mp_x, left_mp_y)
             - 'right_x', 'right_y': Right eye position (right_mp_x, right_mp_y)
+        filter_level: Filter level to apply. Options: 'raw', 'low', 'med', 'high'
 
     Returns:
         tuple: (time_array from timestamp_sec, signal_array, signal_name)
     """
     time = []
-    signal = []
+    raw_values = []  # Collect raw values first
+    last_good_value = None  # Track last good value for blink handling
 
+    # Validate filter level
+    if filter_level not in SMOOTHING_PRESETS:
+        filter_level = 'low'  # Default fallback
+
+    # First pass: collect raw values from all frames
     for frame in frames:
-        # timestamp_sec from recording_tracking_data.json
         t = frame.get('timestamp_sec')
         if t is None:
             continue
 
-        # Extract signal based on type
+        is_blink = frame.get('is_blink', False)
+
+        # Extract RAW signal value based on type
         if signal_type == 'gaze_x':
-            # Use raw gaze coordinates directly from recording_tracking_data.json
+            # Use raw gaze X coordinate
             value = frame.get('gaze_x_raw')
             if value is None:
                 # Fallback to calculated gaze if raw not available
@@ -165,7 +188,7 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
                 else:
                     continue
         elif signal_type == 'gaze_y':
-            # Use raw gaze coordinates directly from recording_tracking_data.json
+            # Use raw gaze Y coordinate
             value = frame.get('gaze_y_raw')
             if value is None:
                 # Fallback to calculated gaze if raw not available
@@ -223,13 +246,49 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
             value = frame.get(signal_type)
 
         if value is None:
-            continue
+            # If blink and we have a last good value, use it
+            if is_blink and last_good_value is not None:
+                value = last_good_value
+            else:
+                continue
+
+        # During blink, use last good value to prevent spikes
+        if is_blink:
+            if last_good_value is not None:
+                value = last_good_value
+        else:
+            # Update last good value when not blinking
+            last_good_value = value
 
         time.append(t)
-        signal.append(value)
+        raw_values.append(value)
+
+    if len(time) == 0:
+        return np.array([]), np.array([]), signal_type
 
     time = np.array(time)
-    signal = np.array(signal)
+    raw_values = np.array(raw_values)
+
+    # Second pass: apply filtering based on filter_level
+    if filter_level == 'raw' or SMOOTHING_PRESETS[filter_level] is None:
+        # No filtering - use raw values
+        signal = raw_values
+    else:
+        # Apply OneEuroFilter with specified preset
+        preset = SMOOTHING_PRESETS[filter_level]
+        filter_x = OneEuroFilter(
+            t0=time[0],
+            x0=raw_values[0],
+            min_cutoff=preset['min_cutoff'],
+            beta=preset['beta']
+        )
+
+        signal = []
+        for t, raw_val in zip(time, raw_values):
+            filtered_val = filter_x(t, raw_val)
+            signal.append(filtered_val)
+
+        signal = np.array(signal)
 
     # Subtract mean to center signal
     if len(signal) > 0:
@@ -249,13 +308,14 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
     return time, signal, signal_name
 
 
-def read_tracking_data(file_path, signal_type='gaze_x'):
+def read_tracking_data(file_path, signal_type='gaze_x', filter_level='low'):
     """
     Read tracking data from recording_tracking_data.json file and extract signal.
 
     Args:
         file_path: Path to recording_tracking_data.json file
         signal_type: Type of signal to extract
+        filter_level: Filter level to apply ('raw', 'low', 'med', 'high')
 
     Returns:
         dict with time (from timestamp_sec), signal, and metadata
@@ -269,7 +329,7 @@ def read_tracking_data(file_path, signal_type='gaze_x'):
             return {"error": "No frames found in tracking data"}
 
         # Extract time (timestamp_sec) and signal (eye coordinates) from frames
-        time, signal, signal_name = extract_signal_from_tracking(frames, signal_type)
+        time, signal, signal_name = extract_signal_from_tracking(frames, signal_type, filter_level)
 
         if len(time) == 0:
             return {"error": f"No valid {signal_type} data found in tracking"}
@@ -282,7 +342,8 @@ def read_tracking_data(file_path, signal_type='gaze_x'):
             "signal_name": signal_name,
             "max_time": max_time,
             "num_frames": len(frames),
-            "num_valid": len(time)
+            "num_valid": len(time),
+            "filter_level": filter_level
         }
 
     except Exception as e:
@@ -373,7 +434,7 @@ def fit_parameters(time, signal, event_times, before_lim, after_lim):
         return {"error": str(e)}
 
 
-def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim):
+def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim, filter_level='low'):
     """
     Detect visual stimuli changes and fit parameters to the signal.
 
@@ -382,6 +443,7 @@ def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim):
         signal_type: Type of signal to extract and fit
         before_lim: Time before event to include
         after_lim: Time after event to include
+        filter_level: Filter level to apply ('raw', 'low', 'med', 'high')
 
     Returns:
         dict with detected stimuli changes, fit results, and stimuli info
@@ -401,8 +463,8 @@ def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim):
         if stimuli_result['num_changes'] == 0:
             return {"error": "No visual stimuli changes detected"}
 
-        # Extract signal
-        time, signal, signal_name = extract_signal_from_tracking(frames, signal_type)
+        # Extract signal with specified filter level
+        time, signal, signal_name = extract_signal_from_tracking(frames, signal_type, filter_level)
 
         if len(time) == 0:
             return {"error": f"No valid {signal_type} data found"}
@@ -423,6 +485,7 @@ def detect_stimuli_and_fit(file_path, signal_type, before_lim, after_lim):
             "stimuli_info": stimuli_result['stimuli_info'],
             "fit_results": fit_result.get("results", []),
             "signal_name": signal_name,
+            "filter_level": filter_level,
             "error": fit_result.get("error")
         }
 
@@ -465,11 +528,12 @@ def main():
 
     try:
         if command == "read":
-            # Read tracking file: python analyze_recording.py read <file_path> <signal_type>
+            # Read tracking file: python analyze_recording.py read <file_path> <signal_type> <filter_level>
             file_path = sys.argv[2]
             signal_type = sys.argv[3] if len(sys.argv) > 3 else "gaze_x"
+            filter_level = sys.argv[4] if len(sys.argv) > 4 else "low"
 
-            result = read_tracking_data(file_path, signal_type)
+            result = read_tracking_data(file_path, signal_type, filter_level)
             print(json.dumps(result))
 
         elif command == "detect-stimuli":
@@ -480,7 +544,8 @@ def main():
                 data["file_path"],
                 data["signal_type"],
                 data["before_lim"],
-                data["after_lim"]
+                data["after_lim"],
+                data.get("filter_level", "low")
             )
             print(json.dumps(result))
 

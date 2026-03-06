@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import {
   listSessions,
   readSessionTracking,
@@ -6,6 +6,8 @@ import {
   detectStimuliAndFit,
   fitRecordingData,
   saveRecordingResults,
+  getSessionVideoPath,
+  readRawTrackingData,
   type FitResult,
   type SessionInfo,
   type StimuliInfo,
@@ -33,16 +35,25 @@ const SIGNAL_TYPES = [
   { value: "right_y", label: "Right Eye Y" },
 ];
 
+const FILTER_LEVELS = [
+  { value: "raw", label: "Raw (No Filter)" },
+  { value: "low", label: "Low (Light Smoothing)" },
+  { value: "med", label: "Medium (Balanced)" },
+  { value: "high", label: "High (Heavy Smoothing)" },
+];
+
 export default function AnalyzeVideo() {
   // Session and data state
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [signalType, setSignalType] = useState<string>("gaze_xy");
+  const [filterLevel, setFilterLevel] = useState<string>("low"); // raw, low, med, high
   const [timeData, setTimeData] = useState<number[]>([]);
   const [signalData, setSignalData] = useState<number[]>([]);
   const [signalName, setSignalName] = useState<string>("");
   const [loadedFilePath, setLoadedFilePath] = useState<string>("");
   const [eventsFilePath, setEventsFilePath] = useState<string>("");
+  const [trackingFrames, setTrackingFrames] = useState<any[]>([]); // Store full frame data for gaze lookup
 
   // Analysis parameters
   const [tMin, setTMin] = useState<number>(0);
@@ -60,6 +71,12 @@ export default function AnalyzeVideo() {
 
   // Transition timeline state
   const [transitions, setTransitions] = useState<TransitionInfo[]>([]);
+
+  // Video preview state
+  const [videoPath, setVideoPath] = useState<string>("");
+  const [showVideo, setShowVideo] = useState<boolean>(true);
+  const [markerTime, setMarkerTime] = useState<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   // UI state
   const [loading, setLoading] = useState<boolean>(false);
@@ -125,6 +142,23 @@ export default function AnalyzeVideo() {
     return map;
   }, [transitions]);
 
+  // Seek video to marker position
+  useEffect(() => {
+    if (markerTime !== null && videoRef.current && videoRef.current.readyState >= 2) {
+      videoRef.current.currentTime = markerTime;
+    }
+  }, [markerTime]);
+
+  // Handle chart click to set marker
+  const handleChartClick = (e: any) => {
+    if (e && e.activeLabel !== undefined) {
+      const clickedTime = parseFloat(e.activeLabel);
+      if (!isNaN(clickedTime)) {
+        setMarkerTime(clickedTime);
+      }
+    }
+  };
+
   async function handleLoadData() {
     if (!selectedSessionId) {
       setError("No session selected");
@@ -140,7 +174,7 @@ export default function AnalyzeVideo() {
 
     try {
       // Read XY coordinates and timestamps from tracking_data.json
-      const result = await readSessionTracking(selectedSessionId, signalType);
+      const result = await readSessionTracking(selectedSessionId, signalType, filterLevel);
 
       if (!result.ok) {
         setError(result.message ?? "Failed to read tracking data");
@@ -189,6 +223,7 @@ export default function AnalyzeVideo() {
         signalType,
         beforeLim,
         afterLim,
+        filterLevel,
       });
 
       if (!result.ok) {
@@ -330,7 +365,7 @@ export default function AnalyzeVideo() {
       handleLoadData();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSessionId, signalType]);
+  }, [selectedSessionId, signalType, filterLevel]);
 
   // Load transitions only after "Fit Events" is clicked
   // Transitions are cleared when session or signal type changes
@@ -339,15 +374,54 @@ export default function AnalyzeVideo() {
     setTransitions([]);
   }, [selectedSessionId]);
 
+  // Load video path and raw tracking data when session changes
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setVideoPath("");
+      setTrackingFrames([]);
+      return;
+    }
+    (async () => {
+      // Load video path
+      const videoResult = await getSessionVideoPath(selectedSessionId);
+      if (videoResult.ok && videoResult.path) {
+        // Convert file path to media:// protocol URL
+        setVideoPath(`media://${videoResult.path}`);
+      } else {
+        setVideoPath("");
+      }
+
+      // Load raw tracking data for gaze lookup
+      const trackingResult = await readRawTrackingData(selectedSessionId);
+      if (trackingResult.ok && trackingResult.data?.frames) {
+        setTrackingFrames(trackingResult.data.frames);
+      } else {
+        setTrackingFrames([]);
+      }
+    })();
+  }, [selectedSessionId]);
+
   return (
     <div className="space-y-4">
+      {/* Hidden video element for seeking */}
+      {videoPath && (
+        <video
+          ref={videoRef}
+          src={videoPath}
+          className="hidden"
+          muted
+          playsInline
+          preload="auto"
+        />
+      )}
+
       <div>
         <h1 className="text-xl font-semibold">Analyze Recording Data</h1>
         <p className="text-sm text-gray-600">
           Load tracking data from <code className="bg-gray-100 px-1 rounded">recording_tracking_data.json</code> files.
           Uses <code className="bg-gray-100 px-1 rounded">timestamp_sec</code> for event times,
           <code className="bg-gray-100 px-1 rounded">current_frame</code> for stimulus detection, and
-          <code className="bg-gray-100 px-1 rounded">gaze_x_raw, gaze_y_raw</code> for gaze coordinates.
+          <code className="bg-gray-100 px-1 rounded">gaze_x, gaze_y</code> (OneEuroFilter smoothed) for gaze coordinates.
           Click "Fit Events" to detect stimulus changes and fit exponential curves.
         </p>
       </div>
@@ -421,7 +495,7 @@ export default function AnalyzeVideo() {
         </div>
 
         {/* Parameter Controls */}
-        <div className="grid gap-2 md:grid-cols-3 lg:grid-cols-5">
+        <div className="grid gap-2 md:grid-cols-3 lg:grid-cols-6">
           <div>
             <label className="text-xs text-gray-600">Signal Type</label>
             <select
@@ -433,6 +507,21 @@ export default function AnalyzeVideo() {
               {SIGNAL_TYPES.map((type) => (
                 <option key={type.value} value={type.value}>
                   {type.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600">Filter Level</label>
+            <select
+              className="w-full px-2 py-1 text-sm border rounded"
+              value={filterLevel}
+              onChange={(e) => setFilterLevel(e.target.value)}
+              disabled={loading}
+            >
+              {FILTER_LEVELS.map((level) => (
+                <option key={level.value} value={level.value}>
+                  {level.label}
                 </option>
               ))}
             </select>
@@ -521,7 +610,7 @@ export default function AnalyzeVideo() {
             )}
           </div>
           <ResponsiveContainer width="100%" height={400}>
-            <LineChart data={mainChartData}>
+            <LineChart data={mainChartData} onClick={handleChartClick}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
                 dataKey="time"
@@ -548,10 +637,53 @@ export default function AnalyzeVideo() {
                 ))}
               <Line type="monotone" dataKey="signal" stroke="#2563eb" dot={false} strokeWidth={1.5} />
               {eventTimes.map((eventTime, idx) => (
-                <ReferenceLine key={idx} x={eventTime} stroke="#dc2626" strokeWidth={2} strokeDasharray="3 3" />
+                <ReferenceLine key={`event-${idx}`} x={eventTime} stroke="#dc2626" strokeWidth={2} strokeDasharray="3 3" />
               ))}
+              {markerTime !== null && (
+                <ReferenceLine x={markerTime} stroke="#10b981" strokeWidth={3} label="Marker" />
+              )}
             </LineChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Video Player Section */}
+      {mainChartData.length > 0 && videoPath && (
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">Tracked Video Preview</div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={showVideo}
+                onChange={(e) => setShowVideo(e.target.checked)}
+                className="rounded"
+              />
+              Show Video
+            </label>
+          </div>
+
+          {showVideo && (
+            <div className="space-y-2">
+              <div className="text-xs text-gray-600">
+                {markerTime !== null ? (
+                  <span>Showing frame at: {markerTime.toFixed(3)}s (Click on chart to change position)</span>
+                ) : (
+                  <span>Click on the chart above to select a timestamp</span>
+                )}
+              </div>
+              <video
+                ref={videoRef}
+                src={videoPath}
+                className="w-full h-auto rounded bg-black"
+                style={{ maxHeight: 400 }}
+                controls
+                muted
+                playsInline
+                preload="auto"
+              />
+            </div>
+          )}
         </div>
       )}
 

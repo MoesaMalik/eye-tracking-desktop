@@ -400,7 +400,7 @@ ipcMain.handle(
 );
 ipcMain.handle(
   "recording:read",
-  async (_e, { sessionId, signalType }) => {
+  async (_e, { sessionId, signalType, filterLevel }) => {
     const python = resolvePython();
     const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
     try {
@@ -414,10 +414,11 @@ ipcMain.handle(
       if (!trackingPath) {
         return { ok: false, message: "Tracking data file not found" };
       }
+      const filter = filterLevel || "low";
       const result = await new Promise((resolve, reject) => {
         const proc = spawn(
           python,
-          [scriptPath, "read", trackingPath, signalType],
+          [scriptPath, "read", trackingPath, signalType, filter],
           {
             cwd: process.env.APP_ROOT
           }
@@ -456,7 +457,8 @@ ipcMain.handle(
     sessionId,
     signalType,
     beforeLim,
-    afterLim
+    afterLim,
+    filterLevel
   }) => {
     const python = resolvePython();
     const scriptPath = path.join(process.env.APP_ROOT, "tracker", "analyze_recording.py");
@@ -475,7 +477,8 @@ ipcMain.handle(
         file_path: trackingPath,
         signal_type: signalType,
         before_lim: beforeLim,
-        after_lim: afterLim
+        after_lim: afterLim,
+        filter_level: filterLevel || "low"
       });
       const result = await new Promise((resolve, reject) => {
         const proc = spawn(python, [scriptPath, "detect-stimuli", inputData], {
@@ -1004,6 +1007,42 @@ ipcMain.handle("session:write-json", async (_e, { filePath, data }) => {
     fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
     fs.writeFileSync(resolvedPath, JSON.stringify(data, null, 2));
     return { ok: true, path: resolvedPath };
+  } catch (e) {
+    return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
+  }
+});
+ipcMain.handle("session:get-video-path", async (_e, { sessionId }) => {
+  try {
+    const recDir = path.join(process.env.APP_ROOT, "recordings");
+    const safeSession = safePathSegment(sessionId);
+    const sessionPath = path.join(recDir, safeSession);
+    if (!fs.existsSync(sessionPath)) {
+      return { ok: false, error: "Session folder not found" };
+    }
+    const findVideoFile = (dir) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let trackedVideo = null;
+      let originalVideo = null;
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const found = findVideoFile(fullPath);
+          if (found) return found;
+        } else if (entry.isFile() && entry.name.endsWith(".mp4")) {
+          if (entry.name.includes("_tracked")) {
+            trackedVideo = fullPath;
+          } else if (!originalVideo) {
+            originalVideo = fullPath;
+          }
+        }
+      }
+      return trackedVideo || originalVideo;
+    };
+    const videoPath = findVideoFile(sessionPath);
+    if (!videoPath) {
+      return { ok: false, error: "Video file not found" };
+    }
+    return { ok: true, path: videoPath };
   } catch (e) {
     return { ok: false, error: String((e == null ? void 0 : e.message) ?? e) };
   }

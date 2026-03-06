@@ -132,12 +132,14 @@ export async function listSessions(limit = 20): Promise<SessionInfo[]> {
  */
 export async function readSessionTracking(
   sessionId: string,
-  signalType: string = "gaze_x"
+  signalType: string = "gaze_x",
+  filterLevel: string = "low"
 ): Promise<RecordingReadResult> {
   try {
     const result = await invokeIpc("recording:read", {
       sessionId,
       signalType,
+      filterLevel,
     });
 
     return result as RecordingReadResult;
@@ -178,6 +180,7 @@ export async function detectStimuliAndFit(params: {
   signalType: string;
   beforeLim: number;
   afterLim: number;
+  filterLevel?: string;
 }): Promise<RecordingDetectStimuliResult> {
   try {
     const result = await invokeIpc("recording:detect-stimuli", params);
@@ -251,6 +254,42 @@ export async function readSessionTransitions(
     return {
       ok: false,
       message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Get the video file path for a session
+ */
+export async function getSessionVideoPath(
+  sessionId: string
+): Promise<{ ok: boolean; path?: string; error?: string }> {
+  try {
+    const result = await invokeIpc("session:get-video-path", { sessionId });
+    return result as { ok: boolean; path?: string; error?: string };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Read raw tracking JSON data (full frames array)
+ */
+export async function readRawTrackingData(sessionId: string): Promise<{
+  ok: boolean;
+  data?: { frames: any[] };
+  error?: string;
+}> {
+  try {
+    const result = await invokeIpc("recordings:readTracking", { sessionId });
+    return result as { ok: boolean; data?: { frames: any[] }; error?: string };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }

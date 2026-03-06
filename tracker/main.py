@@ -300,18 +300,27 @@ class EyeTracker:
                 writer.release()
             raise RuntimeError("Could not create VideoWriter with avc1/H264/mp4v")
 
+        # Will calculate actual FPS after processing to fix speed issues
+        # For now, create writer with input FPS (will be corrected later)
         video_writer = _make_writer(output_video_path, self.fps, (self.width, self.height))
 
         print("Processing...\n")
         use_ellipse_L = 0
         use_ellipse_R = 0
 
+        # Track wall-clock time for accurate FPS calculation
+        import time as time_module
+        processing_start_time = time_module.time()
+
+        frames_written = 0
         for frame_idx in tqdm(range(self.total_frames), desc="Tracking", unit="frame"):
             ret, frame = self.cap.read()
             if not ret:
                 break
 
+            # Use input video timestamps
             timestamp_sec = frame_idx / self.fps
+            frames_written += 1
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = face_mesh.process(rgb)
@@ -869,6 +878,37 @@ class EyeTracker:
 
         self.cap.release()
         video_writer.release()
+
+        # Calculate actual processing FPS
+        processing_end_time = time_module.time()
+        processing_duration = processing_end_time - processing_start_time
+        actual_fps = frames_written / processing_duration if processing_duration > 0 else self.fps
+
+        print(f"\n[INFO] Processing took {processing_duration:.1f}s for {frames_written} frames")
+        print(f"[INFO] Input video FPS: {self.fps:.2f}")
+        print(f"[INFO] Actual processing FPS: {actual_fps:.2f}")
+
+        # Re-encode video with correct FPS if there's a significant mismatch
+        # This fixes the speed issue where processed video plays too fast
+        if abs(actual_fps - self.fps) > 1.0:
+            print(f"[INFO] Re-encoding video with correct FPS to fix playback speed...")
+            temp_video = output_video_path.with_suffix('.temp.mp4')
+            output_video_path.rename(temp_video)
+
+            # Read the temp video and write with correct FPS
+            temp_cap = cv2.VideoCapture(str(temp_video))
+            corrected_writer = _make_writer(output_video_path, self.fps, (self.width, self.height))
+
+            while True:
+                ret, frame = temp_cap.read()
+                if not ret:
+                    break
+                corrected_writer.write(frame)
+
+            temp_cap.release()
+            corrected_writer.release()
+            temp_video.unlink()  # Delete temp file
+            print(f"[INFO] Video re-encoded with FPS: {self.fps:.2f}")
 
         self.detector_stats = {
             'ellipse_used_left': int(use_ellipse_L),

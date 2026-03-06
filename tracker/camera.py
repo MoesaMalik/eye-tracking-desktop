@@ -269,12 +269,38 @@ def record_video(camera_index, output_dir="recordings", show_preview=True, stop_
     if real_fps < 1 or real_fps > 240:
         real_fps = fps
 
+    # Re-encode video with correct FPS if there's a mismatch
+    # This ensures playback speed matches recording speed
+    if abs(real_fps - fps) > 1.0:
+        print(f"\n[INFO] Writer FPS ({fps:.1f}) != Real FPS ({real_fps:.1f})")
+        print(f"[INFO] Re-encoding video with correct FPS to fix playback speed...")
+
+        temp_video = video_filename.with_suffix('.temp.mp4')
+        video_filename.rename(temp_video)
+
+        # Re-encode with correct FPS
+        temp_cap = cv2.VideoCapture(str(temp_video))
+        corrected_writer = _make_writer(video_filename, real_fps, (width, height))
+
+        reencoded_frames = 0
+        while True:
+            ret, frame = temp_cap.read()
+            if not ret:
+                break
+            corrected_writer.write(frame)
+            reencoded_frames += 1
+
+        temp_cap.release()
+        corrected_writer.release()
+        temp_video.unlink()  # Delete temp file
+        print(f"[INFO] Re-encoded {reencoded_frames} frames with FPS: {real_fps:.1f}")
+
     # Save recording metadata so the tracker can use the correct FPS
     meta = {
         "frame_count": frame_count,
         "wall_clock_duration_sec": round(wall_clock_duration, 4),
         "real_fps": round(real_fps, 4),
-        "writer_fps": fps,
+        "writer_fps": real_fps,  # Updated to reflect re-encoded FPS
         "requested_fps": requested_fps,
         "measured_fps_burst": measured_fps,
         "resolution": [width, height],
@@ -283,7 +309,7 @@ def record_video(camera_index, output_dir="recordings", show_preview=True, stop_
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"[OK] Saved recording metadata → {meta_path}")
-    print(f"     Writer FPS: {fps:.1f}, Real FPS: {real_fps:.1f}, Wall-clock: {wall_clock_duration:.1f}s")
+    print(f"     Writer FPS: {real_fps:.1f}, Real FPS: {real_fps:.1f}, Wall-clock: {wall_clock_duration:.1f}s")
 
     print(f"\n[OK] Recording complete ({frame_count} frames)\n")
     return str(video_filename), real_fps
