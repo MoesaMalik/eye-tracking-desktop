@@ -35,66 +35,80 @@ def calculate_fit_error(t, signal, lim_before, lim_after):
 
 def detect_stimuli_changes(frames):
     """
-    Detect visual stimuli changes in the recording.
+    Detect visual stimuli changes in the recording_tracking_data.json.
     Goes through EVERY frame to ensure ALL changes are detected.
 
+    Skips the initial None->center transition and starts from center->first_target.
+
     Args:
-        frames: List of tracking frame dictionaries
+        frames: List of tracking frame dictionaries from recording_tracking_data.json
+                Each frame contains: timestamp_sec, current_frame (stimulus), gaze_x_raw, gaze_y_raw
 
     Returns:
-        dict with event_times, event_frames, and stimuli_info
+        dict with event_times (from timestamp_sec), event_frames, and stimuli_info
     """
     event_times = []
     event_frames = []
     stimuli_info = []
 
-    prev_current_frame = None
+    prev_filename = None
     prev_slide_index = None
 
-    # Debug: Track all unique current_frame values seen
-    unique_frames = set()
+    # Debug: Track all unique filename values seen
+    unique_filenames = set()
+
+    # Track if we've started recording (after first center->target transition)
+    recording_started = False
 
     for i, frame in enumerate(frames):
         frame_num = frame.get('frame')
+        # timestamp_sec comes from recording_tracking_data.json - this is the event time
         timestamp = frame.get('timestamp_sec')
-        current_frame = frame.get('current_frame') or frame.get('filename')  # fallback for old data
+        # Use filename first (what the JSON actually has), fallback to current_frame
+        filename = frame.get('filename') or frame.get('current_frame')
         slide_index = frame.get('slide_index')
 
-        # Track unique current_frame values
-        if current_frame is not None:
-            unique_frames.add(current_frame)
+        # Track unique filename values
+        if filename is not None:
+            unique_filenames.add(filename)
 
-        # Detect change in visual stimuli (check if current_frame changed)
-        # Handle None values carefully - a change from None to something, or something to None, is also a change
+        # Detect change in visual stimuli
         has_changed = False
 
         if i > 0:  # Not the first frame
-            # Change detected if current_frame values are different (including None transitions)
-            if prev_current_frame != current_frame:
+            # Change detected if filename values are different
+            if prev_filename != filename:
                 has_changed = True
 
+        # Skip the None->center.png transition (only record transitions FROM center onwards)
         if has_changed and frame_num is not None and timestamp is not None:
-            event_times.append(timestamp)
-            event_frames.append(frame_num)
-            stimuli_info.append({
-                'frame': frame_num,
-                'time': timestamp,
-                'from_frame': prev_current_frame if prev_current_frame is not None else 'None',
-                'to_frame': current_frame if current_frame is not None else 'None',
-                'from_filename': prev_current_frame if prev_current_frame is not None else 'None',
-                'to_filename': current_frame if current_frame is not None else 'None',
-                'from_slide': prev_slide_index if prev_slide_index is not None else -1,
-                'to_slide': slide_index if slide_index is not None else -1
-            })
+            # Check if this is a transition FROM center to a target (start recording)
+            if prev_filename == "center.png" and filename != "center.png" and filename is not None:
+                recording_started = True
+
+            # Only record events after we've started recording
+            if recording_started:
+                event_times.append(timestamp)
+                event_frames.append(frame_num)
+                stimuli_info.append({
+                    'frame': frame_num,
+                    'time': timestamp,
+                    'from_frame': prev_filename if prev_filename is not None else 'None',
+                    'to_frame': filename if filename is not None else 'None',
+                    'from_filename': prev_filename if prev_filename is not None else 'None',
+                    'to_filename': filename if filename is not None else 'None',
+                    'from_slide': prev_slide_index if prev_slide_index is not None else -1,
+                    'to_slide': slide_index if slide_index is not None else -1
+                })
 
         # Always update previous values
-        prev_current_frame = current_frame
+        prev_filename = filename
         prev_slide_index = slide_index
 
     # Debug logging to stderr (won't interfere with JSON output)
     import sys
     print(f"DEBUG: Processed {len(frames)} frames", file=sys.stderr)
-    print(f"DEBUG: Found {len(unique_frames)} unique stimuli: {sorted(unique_frames)}", file=sys.stderr)
+    print(f"DEBUG: Found {len(unique_filenames)} unique stimuli: {sorted(unique_filenames)}", file=sys.stderr)
     print(f"DEBUG: Detected {len(event_times)} stimuli changes", file=sys.stderr)
 
     return {
@@ -104,87 +118,95 @@ def detect_stimuli_changes(frames):
         'num_changes': len(event_times),
         'debug_info': {
             'total_frames': len(frames),
-            'unique_stimuli': list(sorted(unique_frames)),
-            'num_unique_stimuli': len(unique_frames)
+            'unique_stimuli': list(sorted(unique_filenames)),
+            'num_unique_stimuli': len(unique_filenames)
         }
     }
 
 
 def extract_signal_from_tracking(frames, signal_type='gaze_x'):
     """
-    Extract a signal from tracking frames.
+    Extract a signal from recording_tracking_data.json frames.
 
     Args:
-        frames: List of tracking frame dictionaries
+        frames: List of tracking frame dictionaries from recording_tracking_data.json
         signal_type: Type of signal to extract. Options:
-            - 'gaze_x', 'gaze_y': Gaze position (average of left and right eyes)
-            - 'gaze_xy': Combined gaze magnitude (sqrt(x^2 + y^2))
-            - 'left_x', 'left_y': Left eye position
-            - 'right_x', 'right_y': Right eye position
-            - 'left_mp_x', 'left_mp_y': Left eye midpoint
-            - 'right_mp_x', 'right_mp_y': Right eye midpoint
+            - 'gaze_x', 'gaze_y': Gaze position from gaze_x_raw, gaze_y_raw
+            - 'gaze_xy': Combined gaze magnitude from raw values (sqrt(x^2 + y^2))
+            - 'left_x', 'left_y': Left eye position (left_mp_x, left_mp_y)
+            - 'right_x', 'right_y': Right eye position (right_mp_x, right_mp_y)
 
     Returns:
-        tuple: (time_array, signal_array, signal_name)
+        tuple: (time_array from timestamp_sec, signal_array, signal_name)
     """
     time = []
     signal = []
 
     for frame in frames:
+        # timestamp_sec from recording_tracking_data.json
         t = frame.get('timestamp_sec')
         if t is None:
             continue
 
         # Extract signal based on type
         if signal_type == 'gaze_x':
-            left_x = frame.get('left_mp_x')
-            right_x = frame.get('right_mp_x')
-            if left_x is not None and right_x is not None:
-                value = (left_x + right_x) / 2
-            elif left_x is not None:
-                value = left_x
-            elif right_x is not None:
-                value = right_x
-            else:
-                continue
+            # Use raw gaze coordinates directly from recording_tracking_data.json
+            value = frame.get('gaze_x_raw')
+            if value is None:
+                # Fallback to calculated gaze if raw not available
+                left_x = frame.get('left_mp_x')
+                right_x = frame.get('right_mp_x')
+                if left_x is not None and right_x is not None:
+                    value = (left_x + right_x) / 2
+                elif left_x is not None:
+                    value = left_x
+                elif right_x is not None:
+                    value = right_x
+                else:
+                    continue
         elif signal_type == 'gaze_y':
-            left_y = frame.get('left_mp_y')
-            right_y = frame.get('right_mp_y')
-            if left_y is not None and right_y is not None:
-                value = (left_y + right_y) / 2
-            elif left_y is not None:
-                value = left_y
-            elif right_y is not None:
-                value = right_y
-            else:
-                continue
+            # Use raw gaze coordinates directly from recording_tracking_data.json
+            value = frame.get('gaze_y_raw')
+            if value is None:
+                # Fallback to calculated gaze if raw not available
+                left_y = frame.get('left_mp_y')
+                right_y = frame.get('right_mp_y')
+                if left_y is not None and right_y is not None:
+                    value = (left_y + right_y) / 2
+                elif left_y is not None:
+                    value = left_y
+                elif right_y is not None:
+                    value = right_y
+                else:
+                    continue
         elif signal_type == 'gaze_xy':
-            # Combined X and Y gaze - magnitude from origin
-            left_x = frame.get('left_mp_x')
-            right_x = frame.get('right_mp_x')
-            left_y = frame.get('left_mp_y')
-            right_y = frame.get('right_mp_y')
-
-            # Calculate average gaze X and Y
-            gaze_x = None
-            gaze_y = None
-
-            if left_x is not None and right_x is not None:
-                gaze_x = (left_x + right_x) / 2
-            elif left_x is not None:
-                gaze_x = left_x
-            elif right_x is not None:
-                gaze_x = right_x
-
-            if left_y is not None and right_y is not None:
-                gaze_y = (left_y + right_y) / 2
-            elif left_y is not None:
-                gaze_y = left_y
-            elif right_y is not None:
-                gaze_y = right_y
+            # Combined X and Y gaze - magnitude from origin using raw values
+            gaze_x = frame.get('gaze_x_raw')
+            gaze_y = frame.get('gaze_y_raw')
 
             if gaze_x is None or gaze_y is None:
-                continue
+                # Fallback to calculated gaze if raw not available
+                left_x = frame.get('left_mp_x')
+                right_x = frame.get('right_mp_x')
+                left_y = frame.get('left_mp_y')
+                right_y = frame.get('right_mp_y')
+
+                if left_x is not None and right_x is not None:
+                    gaze_x = (left_x + right_x) / 2
+                elif left_x is not None:
+                    gaze_x = left_x
+                elif right_x is not None:
+                    gaze_x = right_x
+
+                if left_y is not None and right_y is not None:
+                    gaze_y = (left_y + right_y) / 2
+                elif left_y is not None:
+                    gaze_y = left_y
+                elif right_y is not None:
+                    gaze_y = right_y
+
+                if gaze_x is None or gaze_y is None:
+                    continue
 
             # Calculate magnitude: sqrt(x^2 + y^2)
             value = np.sqrt(gaze_x**2 + gaze_y**2)
@@ -229,14 +251,14 @@ def extract_signal_from_tracking(frames, signal_type='gaze_x'):
 
 def read_tracking_data(file_path, signal_type='gaze_x'):
     """
-    Read tracking data from JSON file and extract signal.
+    Read tracking data from recording_tracking_data.json file and extract signal.
 
     Args:
-        file_path: Path to tracking JSON file
+        file_path: Path to recording_tracking_data.json file
         signal_type: Type of signal to extract
 
     Returns:
-        dict with time, signal, and metadata
+        dict with time (from timestamp_sec), signal, and metadata
     """
     try:
         with open(file_path, 'r') as f:
@@ -246,6 +268,7 @@ def read_tracking_data(file_path, signal_type='gaze_x'):
         if not frames:
             return {"error": "No frames found in tracking data"}
 
+        # Extract time (timestamp_sec) and signal (eye coordinates) from frames
         time, signal, signal_name = extract_signal_from_tracking(frames, signal_type)
 
         if len(time) == 0:

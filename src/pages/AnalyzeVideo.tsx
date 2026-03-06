@@ -6,7 +6,6 @@ import {
   detectStimuliAndFit,
   fitRecordingData,
   saveRecordingResults,
-  getRecordingPath,
   type FitResult,
   type SessionInfo,
   type StimuliInfo,
@@ -136,9 +135,11 @@ export default function AnalyzeVideo() {
     setError(null);
     setMessage(null);
     setFitResults([]);
+    // Clear event lines - they will only appear after clicking "Fit Events"
     setEventTimes([]);
 
     try {
+      // Read XY coordinates and timestamps from tracking_data.json
       const result = await readSessionTracking(selectedSessionId, signalType);
 
       if (!result.ok) {
@@ -170,7 +171,7 @@ export default function AnalyzeVideo() {
     }
   }
 
-  async function handleAutoFitEvents() {
+  async function handleFitEvents() {
     if (!selectedSessionId) {
       setError("No session selected");
       return;
@@ -181,6 +182,8 @@ export default function AnalyzeVideo() {
     setMessage(null);
 
     try {
+      // Detect stimuli changes from tracking_data.json and fit exponential curves
+      // Uses timestamp_sec for event times and current_frame for stimuli detection
       const result = await detectStimuliAndFit({
         sessionId: selectedSessionId,
         signalType,
@@ -213,6 +216,12 @@ export default function AnalyzeVideo() {
           (fileMatch ? " ✓" : ` ⚠️ File mismatch!`) +
           (debugInfo ? ` | ${debugInfo.total_frames} frames, ${debugInfo.num_unique_stimuli} unique stimuli` : "")
         );
+
+        // Load transitions (colored bands) after fitting events
+        const transitionsResult = await readSessionTransitions(selectedSessionId);
+        if (transitionsResult.ok && transitionsResult.data) {
+          setTransitions(transitionsResult.data.transitions);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -315,6 +324,7 @@ export default function AnalyzeVideo() {
   }
 
   // Auto-load data when session or signal type changes
+  // This also clears any previous event lines
   useEffect(() => {
     if (selectedSessionId) {
       handleLoadData();
@@ -322,24 +332,11 @@ export default function AnalyzeVideo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSessionId, signalType]);
 
-  // Auto-load transitions when session changes
+  // Load transitions only after "Fit Events" is clicked
+  // Transitions are cleared when session or signal type changes
   useEffect(() => {
-    if (!selectedSessionId) {
-      setTransitions([]);
-      return;
-    }
-    (async () => {
-      try {
-        const result = await readSessionTransitions(selectedSessionId);
-        if (result.ok && result.data) {
-          setTransitions(result.data.transitions);
-        } else {
-          setTransitions([]);
-        }
-      } catch {
-        setTransitions([]);
-      }
-    })();
+    // Clear transitions when session changes
+    setTransitions([]);
   }, [selectedSessionId]);
 
   return (
@@ -347,8 +344,11 @@ export default function AnalyzeVideo() {
       <div>
         <h1 className="text-xl font-semibold">Analyze Recording Data</h1>
         <p className="text-sm text-gray-600">
-          Load tracking data from recorded sessions, detect visual stimuli changes automatically, fit exponential curves
-          to eye movements at stimulus transitions, and extract parameters.
+          Load tracking data from <code className="bg-gray-100 px-1 rounded">recording_tracking_data.json</code> files.
+          Uses <code className="bg-gray-100 px-1 rounded">timestamp_sec</code> for event times,
+          <code className="bg-gray-100 px-1 rounded">current_frame</code> for stimulus detection, and
+          <code className="bg-gray-100 px-1 rounded">gaze_x_raw, gaze_y_raw</code> for gaze coordinates.
+          Click "Fit Events" to detect stimulus changes and fit exponential curves.
         </p>
       </div>
 
@@ -377,10 +377,10 @@ export default function AnalyzeVideo() {
           </button>
           <button
             className="px-3 py-1.5 rounded border bg-blue-500 text-white disabled:opacity-50"
-            onClick={handleAutoFitEvents}
+            onClick={handleFitEvents}
             disabled={loading || !selectedSessionId}
           >
-            {loading ? "Fitting..." : "Auto-Fit Events"}
+            {loading ? "Fitting..." : "Fit Events"}
           </button>
           <button
             className="px-3 py-1.5 rounded border bg-green-500 text-white disabled:opacity-50"

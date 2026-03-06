@@ -1,0 +1,235 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Eye-Tracking Desktop is an Electron application for conducting eye-tracking research sessions. It combines:
+- **Frontend**: React + TypeScript + Vite + Tailwind CSS
+- **Backend**: Electron (main + preload processes)
+- **Analysis**: Python scripts using MediaPipe for eye tracking
+
+The application runs slide-based protocols (Calibration, Saccades, Sentences, Smooth Pursuit), records sessions for selected patients, and exports anonymous JSON data.
+
+## Development Commands
+
+### Setup
+```bash
+# Python environment setup (required first)
+python3 -m venv .venv
+. .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -r tracker/requirements.txt
+
+# Install Node dependencies
+npm ci
+```
+
+### Running the Application
+```bash
+npm run dev      # Launches Vite dev server + Electron with hot reload
+```
+
+### Building
+```bash
+npm run build    # Compiles TypeScript + builds Vite bundle
+npm run dist     # Builds distributable Electron app (after npm run build)
+```
+
+### Linting and Testing
+```bash
+npm run lint           # Run ESLint
+npm run test           # Run Vitest tests once
+npm run test:watch     # Run Vitest in watch mode
+```
+
+### Python Scripts (Standalone)
+```bash
+# Main eye tracker (with preview)
+python -m tracker.main --cam 0
+
+# Live head positioning feedback
+python -m tracker.live_head_position --cam 0 --fps 30
+
+# Live gaze stream
+python -m tracker.live_gaze_stream --cam 0 --fps 30
+```
+
+## Architecture
+
+### Electron Process Model
+
+**Main Process** (`electron/main.ts`):
+- Creates BrowserWindow, manages app lifecycle
+- Spawns Python child processes for tracking and analysis
+- Registers `media://` custom protocol for video playback
+- Exposes IPC handlers for all Python script interactions
+- Manages three types of Python processes:
+  1. **Tracker** (`tracker/main.py`): Records video + tracks eyes/iris
+  2. **Head Position** (`tracker/live_head_position.py`): Live JSONL stream for UI gating
+  3. **Gaze Stream** (`tracker/live_gaze_stream.py`): Real-time gaze coordinates
+
+**Preload** (`electron/preload.ts`):
+- Bridges IPC between main and renderer via `contextBridge`
+- Exposes typed APIs: `window.tracker`, `window.nativeApi`, `window.startHeadPosition`, etc.
+
+**Renderer** (React app in `src/`):
+- Single-page app with React Router
+- State management via Zustand (`src/lib/` likely contains stores)
+- Pages consume IPC APIs through TypeScript interfaces in `src/vite-env.d.ts`
+
+### Python Tracker Architecture
+
+The `tracker/` directory contains modular Python scripts:
+- **`main.py`**: Core eye-tracking loop (MediaPipe FaceMesh + OpenCV refinement)
+- **`camera.py`**: Video recording utilities
+- **`geometry.py`**: Eye ROI extraction, iris center detection (radius/ellipse/circle fitting)
+- **`filter.py`**: OneEuroFilter for smoothing gaze data
+- **`head_positioning.py`**: Head alignment logic
+- **`visualizer.py`**: Overlay rendering for preview
+- **`calibration_fit.py`**: Calibration fitting algorithm
+- **`analyze_excel.py`**: Excel file parsing + signal analysis for IPC
+- **`analyze_recording.py`**: Post-processing recorded sessions
+- **`live_head_position.py`**: Emits JSONL head position status
+- **`live_gaze_stream.py`**: Emits real-time gaze coordinates
+
+### IPC Communication Pattern
+
+All Python scripts invoked from Electron follow this pattern:
+1. Main process spawns Python script via `spawn()`
+2. Script outputs JSON to stdout (structured responses or JSONL streams)
+3. Main process parses stdout and forwards via `win.webContents.send()` or returns via `ipcRenderer.invoke()` response
+4. Preload exposes typed wrappers for renderer consumption
+
+**Key IPC Channels**:
+- `tracking:start/stop/status` - Main tracker control
+- `head_position:start/stop` + `head_position:update` - Live head alignment
+- `gaze_stream:start/stop` + `gaze_stream:update` - Live gaze feed
+- `excel:pick-file/read/fit/save` - Excel analysis workflow
+- `recording:read/detect-stimuli/fit/save` - Recording analysis workflow
+- `recordings:listSessions/readJson/readTracking` - Session data access
+- `calibration:run` - Run calibration fitting script
+
+### Python Resolving Strategy
+
+`resolvePython()` in `electron/main.ts` searches in order:
+1. `.venv/Scripts/python.exe` or `.venv/bin/python` (platform-specific)
+2. System Python (`py`, `python3`, `python`)
+
+Ensure `.venv` is set up for consistent behavior.
+
+### Session Data Structure
+
+Sessions are stored in `recordings/<session_id>/`:
+- `<session_id>.mp4` - Recorded video
+- `<session_id>_tracking_data.json` - Frame-by-frame tracking data (iris centers, head pose, timestamps, current slide)
+- Nested `session_*/` subdirectories may contain calibration data
+- `calibration_report.json` + `calibration_pairs.json` - Generated by `calibration_fit.py`
+
+The app supports nested session folders (created during re-runs); IPC handlers use `findLatestNestedSessionDir()` to resolve files.
+
+### Protocols and Slides
+
+Protocols are defined in `public/protocols.json`. Each protocol has:
+- `label`: Display name
+- `slides`: Array of slide image paths (relative to `public/`)
+
+Slide images are in `public/assets/protocols/<protocol_name>/`.
+
+During a session (`RunTest.tsx`), the app:
+1. Displays slides fullscreen in sequence
+2. Records video with tracker
+3. Logs slide transitions with timestamps
+4. Embeds `current_frame` (slide name) into tracking JSON
+
+### Live Head Positioning (UI Gating)
+
+Before starting a session, the UI runs `live_head_position.py` which emits JSONL status messages:
+```json
+{"type":"head_position","ts":1700000000.123,"status":"ALIGNING","instruction":"Move right","progress":0.35,"metrics":{"center":[0.52,0.48],"size":0.24,"yaw":null,"pitch":null}}
+```
+
+The UI gates the "Start" button until `status: "READY"` is received. This ensures the subject is properly positioned.
+
+### Media Protocol
+
+The `media://` protocol (registered in `electron/main.ts`) allows the renderer to access local video files via custom URLs. It resolves file paths and serves them to `<video>` elements.
+
+### Processing External Videos
+
+The "Process External" page (`ProcessExternalVideos.tsx`) allows batch processing of .mp4 videos from external eye-tracking systems. Features:
+- Drag-and-drop interface for adding multiple .mp4 files
+- File picker for manual selection
+- Auto-processing queue that processes videos sequentially
+- Real-time logs for each video
+- Uses `startTracker({ videoPath: "...", preview: false })` to process videos offline
+- Output saved to `recordings/` directory with tracking data JSON
+
+## Important Patterns
+
+### JSON Parsing with NaN
+Python may emit `NaN` in JSON output (invalid per spec). Use `parseJsonWithNaN()` helper in `electron/main.ts` which replaces `NaN`, `Infinity`, `-Infinity` with `null` before parsing.
+
+### Path Validation
+All user-provided path segments (e.g., `sessionId`, `filename`) are validated with `safePathSegment()` to prevent directory traversal attacks.
+
+### Python Script Invocation
+Always spawn Python scripts with `PYTHONUNBUFFERED=1` environment variable to ensure stdout/stderr streams are not buffered (critical for real-time JSONL feeds).
+
+### VITE_DEV_SERVER_URL
+This environment variable is set during development. When present, the main process loads from Vite dev server; otherwise, it loads from `dist/index.html`.
+
+## Key Files Reference
+
+### Electron
+- `electron/main.ts` - Main process entry point, all IPC handlers
+- `electron/preload.ts` - Renderer IPC bridge
+- `vite.config.ts` - Vite + Electron plugin config
+
+### Frontend
+- `src/main.tsx` - React entry point
+- `src/App.tsx` - Shell + navigation
+- `src/pages/RunTest.tsx` - Session runner (slide display + recording)
+- `src/pages/Recorder.tsx` - Direct tracker control page
+- `src/pages/Patients.tsx` - Patient management
+- `src/pages/Results.tsx` - Session results browser
+- `src/pages/CalibrateCurrent.tsx` - Calibration workflow
+- `src/pages/CalibrationResults.tsx` - Calibration report viewer
+- `src/pages/AnalyzeVideo.tsx` - Post-recording analysis
+- `src/pages/ProcessExternalVideos.tsx` - Batch process external .mp4 videos through tracker
+- `src/pages/Annotation.tsx` - Video annotation tool
+- `src/pages/Validation.tsx` - Validation workflow
+- `src/vite-env.d.ts` - Global type declarations for `window` APIs
+
+### Python
+- `tracker/main.py` - Main eye tracker (MediaPipe + refinement)
+- `tracker/live_head_position.py` - Head positioning JSONL stream
+- `tracker/live_gaze_stream.py` - Gaze JSONL stream
+- `tracker/calibration_fit.py` - Calibration model fitting
+- `tracker/analyze_excel.py` - Excel signal analysis
+- `tracker/analyze_recording.py` - Post-processing analysis
+- `tracker/requirements.txt` - Python dependencies
+
+### Data
+- `public/protocols.json` - Protocol definitions
+- `recordings/` - Session output directory (gitignored)
+
+## Testing Notes
+
+- Vitest configured with `jsdom` environment for React component tests
+- Test files should be colocated with source (convention: `*.test.ts` or `*.test.tsx`)
+- Mocks are automatically cleared/restored between tests
+
+## Node/Python Version Requirements
+
+- Node.js 20+ (22.x recommended)
+- npm 10+
+- Python 3.8+ (for MediaPipe 0.10.14 compatibility)
+
+## Important Caveats
+
+- Large slide images may require `git lfs install` to fetch properly
+- MediaPipe version is pinned to `0.10.14` (breaking changes in newer versions)
+- The app uses a single-instance lock (`app.requestSingleInstanceLock()`) to prevent multiple instances
+- Preview windows are shown by default (`--no-preview` flag disables)
+- Head positioning process is automatically started/stopped when navigating to/from RunTest or Recorder pages

@@ -1,6 +1,7 @@
 import cv2
 import sys
 import time
+import json
 from pathlib import Path
 from datetime import datetime
 
@@ -226,6 +227,7 @@ def record_video(camera_index, output_dir="recordings", show_preview=True, stop_
 
     frame_count = 0
     stop_requested = False
+    start_wall = time.time()
 
     while True:
         if stop_check and stop_check():
@@ -253,10 +255,35 @@ def record_video(camera_index, output_dir="recordings", show_preview=True, stop_
         if stop_requested:
             break
 
+    end_wall = time.time()
+    wall_clock_duration = end_wall - start_wall
+
     cap.release()
     out.release()
     if show_preview:
         cv2.destroyAllWindows()
 
+    # Compute real FPS from wall-clock timing
+    real_fps = frame_count / wall_clock_duration if wall_clock_duration > 0 else fps
+    # Clamp to reasonable range
+    if real_fps < 1 or real_fps > 240:
+        real_fps = fps
+
+    # Save recording metadata so the tracker can use the correct FPS
+    meta = {
+        "frame_count": frame_count,
+        "wall_clock_duration_sec": round(wall_clock_duration, 4),
+        "real_fps": round(real_fps, 4),
+        "writer_fps": fps,
+        "requested_fps": requested_fps,
+        "measured_fps_burst": measured_fps,
+        "resolution": [width, height],
+    }
+    meta_path = session_dir / "recording_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"[OK] Saved recording metadata → {meta_path}")
+    print(f"     Writer FPS: {fps:.1f}, Real FPS: {real_fps:.1f}, Wall-clock: {wall_clock_duration:.1f}s")
+
     print(f"\n[OK] Recording complete ({frame_count} frames)\n")
-    return str(video_filename), fps
+    return str(video_filename), real_fps

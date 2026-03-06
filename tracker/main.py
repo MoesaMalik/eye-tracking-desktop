@@ -144,10 +144,58 @@ class EyeTracker:
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
 
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        video_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Determine the correct FPS for timestamp calculation.
+        # Priority:
+        #   1. slide_marks.json — use last slide timestamp to compute FPS
+        #      so that tracking timestamps span ALL calibration slides
+        #   2. recording_meta.json — wall-clock measured FPS
+        #   3. video metadata FPS (fallback)
+        self.fps = video_fps
+        meta_fps_source = "video metadata"
+
+        # Search for slide_marks.json in parent dirs (recording root)
+        slide_marks_found = False
+        for candidate_dir in [self.video_path.parent, self.video_path.parent.parent]:
+            sm_path = candidate_dir / "slide_marks.json"
+            if sm_path.exists():
+                try:
+                    with open(sm_path) as smf:
+                        sm_data = json.load(smf)
+                    marks = sm_data.get("marks", [])
+                    if marks:
+                        last_mark_ms = max(m.get("t_ms", 0) for m in marks)
+                        if last_mark_ms > 0 and self.total_frames > 0:
+                            # Add a small buffer (2s) after the last slide to
+                            # account for the final slide's display duration
+                            total_duration_sec = (last_mark_ms / 1000.0) + 2.0
+                            self.fps = self.total_frames / total_duration_sec
+                            meta_fps_source = f"slide_marks.json (last_mark={last_mark_ms/1000:.1f}s, computed_fps={self.fps:.2f})"
+                            slide_marks_found = True
+                except Exception:
+                    pass
+                break
+
+        # Fallback: try recording_meta.json if no slide_marks
+        if not slide_marks_found:
+            for candidate_dir in [self.video_path.parent, self.video_path.parent.parent]:
+                meta_path = candidate_dir / "recording_meta.json"
+                if meta_path.exists():
+                    try:
+                        with open(meta_path) as mf:
+                            meta = json.load(mf)
+                        real_fps = meta.get("real_fps")
+                        if real_fps and 1 <= real_fps <= 240:
+                            self.fps = real_fps
+                            meta_fps_source = f"recording_meta.json (real_fps={real_fps:.2f})"
+                    except Exception:
+                        pass
+                    break
+
         self.duration_sec = self.total_frames / max(1e-6, self.fps)
         self.tracking_data = []
 
@@ -174,7 +222,9 @@ class EyeTracker:
         print(f"VIDEO PROCESSING")
         print(f"{'=' * 70}")
         print(f"Resolution: {self.width}x{self.height}")
-        print(f"FPS: {self.fps:.2f}")
+        print(f"FPS: {self.fps:.2f} (source: {meta_fps_source})")
+        if abs(self.fps - video_fps) > 0.5:
+            print(f"  ⚠ Video metadata FPS was {video_fps:.1f}, corrected to {self.fps:.1f}")
         print(f"Total Frames: {self.total_frames}")
         print(f"Duration: {self.duration_sec:.2f}s")
         print(f"[overlay] raw overlay {'enabled' if self.show_raw_overlay else 'disabled'}")
@@ -911,7 +961,7 @@ class EyeTracker:
                 idx += 1
             if ts >= first_t:
                 current = normalized[idx]
-                frame["current_frame"] = current["filename"]
+                frame["filename"] = current["filename"]
                 if current.get("protocol_key") is not None:
                     frame["protocol_key"] = current["protocol_key"]
                 if current.get("slide_index") is not None:

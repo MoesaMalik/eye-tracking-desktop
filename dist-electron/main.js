@@ -469,7 +469,7 @@ ipcMain.handle(
       }
       const trackingPath = findLatestTrackingDataFile(sessionPath);
       if (!trackingPath) {
-        return { ok: false, message: "Tracking data file not found" };
+        return { ok: false, message: "recording_tracking_data.json file not found" };
       }
       const inputData = JSON.stringify({
         file_path: trackingPath,

@@ -65,6 +65,14 @@ export default function App() {
             >
               Analyze Recording
             </NavLink>
+            <NavLink
+              to="/process-external"
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded ${isActive ? "bg-gray-900 text-white" : "border bg-white"}`
+              }
+            >
+              Process External
+            </NavLink>
           </nav>
         </div>
       </header>

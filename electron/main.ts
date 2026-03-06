@@ -104,6 +104,8 @@ function parseJsonWithNaN(raw: string) {
 }
 
 function findLatestTrackingDataFile(rootDir: string) {
+  // Recursively searches for recording_tracking_data.json (or any file ending with _tracking_data.json)
+  // This file contains frame-by-frame data: timestamp_sec, gaze_x_raw, gaze_y_raw, current_frame
   if (!fs.existsSync(rootDir)) return null;
   let latestPath: string | null = null;
   let latestMtime = 0;
@@ -593,7 +595,10 @@ ipcMain.handle(
     const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
 
     try {
-      // Resolve the tracking data file path
+      // Find recording_tracking_data.json file which contains:
+      // - timestamp_sec: timestamps for each frame
+      // - current_frame: stimulus name (for detecting changes)
+      // - gaze_x_raw, gaze_y_raw: raw gaze coordinates
       const recDir = path.join(process.env.APP_ROOT!, "recordings");
       const safeSession = safePathSegment(sessionId);
       const sessionPath = path.join(recDir, safeSession);
@@ -604,7 +609,7 @@ ipcMain.handle(
 
       const trackingPath = findLatestTrackingDataFile(sessionPath);
       if (!trackingPath) {
-        return { ok: false, message: "Tracking data file not found" };
+        return { ok: false, message: "recording_tracking_data.json file not found" };
       }
 
       const inputData = JSON.stringify({
