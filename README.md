@@ -4,7 +4,7 @@ A research application for conducting eye-tracking sessions with real-time analy
 
 ---
 
-## 🌟 What This App Does
+##  What This App Does
 
 - **Run Eye-Tracking Sessions**: Display slides to participants while recording their eye movements
 - **Manage Patient Records**: Keep track of participants (anonymized with codes like P-7G2Q)
@@ -13,7 +13,7 @@ A research application for conducting eye-tracking sessions with real-time analy
 
 ---
 
-## 📋 Before You Start
+##  Before You Start
 
 You'll need to install two things on your computer:
 
@@ -40,7 +40,7 @@ If you see version numbers, you're good to go! If you see "command not found", y
 
 ---
 
-## 🚀 Setup Guide
+##  Setup Guide
 
 ### Method 1: Using Antigravity (Recommended for Beginners)
 
@@ -56,7 +56,7 @@ If you see version numbers, you're good to go! If you see "command not found", y
 
 Don't worry if you're not familiar with the terminal - just follow these steps carefully!
 
-#### 📂 Step 1: Open Terminal
+#### Step 1: Open Terminal
 
 **On Mac:**
 - Press `Command + Space` to open Spotlight
@@ -69,7 +69,7 @@ Don't worry if you're not familiar with the terminal - just follow these steps c
 **On Linux:**
 - Press `Ctrl + Alt + T`
 
-#### 📍 Step 2: Navigate to the Project Folder
+#### Step 2: Navigate to the Project Folder
 
 You need to tell the terminal where this project is located. Type `cd ` (with a space after it) and then drag the project folder into the terminal window. Press Enter.
 
@@ -78,7 +78,7 @@ Example:
 cd /Users/yourname/Downloads/eye-tracking-desktop
 ```
 
-#### 🐍 Step 3: Set Up Python Environment
+#### Step 3: Set Up Python Environment
 
 This creates an isolated environment for Python packages:
 
@@ -106,7 +106,7 @@ pip install -r tracker/requirements.txt
 
 ⚠️ **Important**: You'll need to activate the virtual environment (`source .venv/bin/activate` or `.venv\Scripts\activate`) every time you open a new terminal window!
 
-#### 📦 Step 4: Install Node Dependencies
+#### Step 4: Install Node Dependencies
 
 ```bash
 npm ci
@@ -117,7 +117,7 @@ This installs all the JavaScript packages needed to run the app. It might take a
 **What's the difference between `npm ci` and `npm install`?**
 - `npm ci` is cleaner and faster - it's what we use in projects!
 
-#### ▶️ Step 5: Run the Application
+#### Step 5: Run the Application
 
 ```bash
 npm run dev
@@ -134,7 +134,7 @@ This starts the development server and launches the application. You should see 
 
 ---
 
-## 🔧 Common Commands
+## Common Commands
 
 Once you've completed the setup, here are the commands you'll use regularly:
 
@@ -202,7 +202,7 @@ The installer will be created in the `dist/` folder.
 
 ---
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### "command not found" error
 
