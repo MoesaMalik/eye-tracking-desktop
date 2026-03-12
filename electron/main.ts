@@ -2,6 +2,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   Menu,
   nativeImage,
   ipcMain,
@@ -78,6 +79,76 @@ function resolvePython(): string {
   return candidates[candidates.length - 1];
 }
 
+function safePathSegment(value: string) {
+  if (!value || value.includes("..") || value.includes("/") || value.includes("\\")) {
+    throw new Error("Invalid path segment");
+  }
+  return value;
+}
+
+function parseSessionTimestamp(name: string) {
+  const match = /_(\d{8})_(\d{6})$/.exec(name);
+  if (!match) return 0;
+  const [yyyy, mm, dd] = [match[1].slice(0, 4), match[1].slice(4, 6), match[1].slice(6, 8)];
+  const [hh, mi, ss] = [match[2].slice(0, 2), match[2].slice(2, 4), match[2].slice(4, 6)];
+  const parsed = new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+function parseJsonWithNaN(raw: string) {
+  const sanitized = raw
+    .replace(/\bNaN\b/g, "null")
+    .replace(/\bInfinity\b/g, "null")
+    .replace(/\b-Infinity\b/g, "null");
+  return JSON.parse(sanitized);
+}
+
+function findLatestTrackingDataFile(rootDir: string) {
+  // Recursively searches for recording_tracking_data.json (or any file ending with _tracking_data.json)
+  // This file contains frame-by-frame data: timestamp_sec, gaze_x, gaze_y (OneEuroFilter smoothed), current_frame
+  if (!fs.existsSync(rootDir)) return null;
+  let latestPath: string | null = null;
+  let latestMtime = 0;
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith("_tracking_data.json")) {
+        const mtimeMs = fs.statSync(fullPath).mtimeMs;
+        if (!latestPath || mtimeMs > latestMtime) {
+          latestPath = fullPath;
+          latestMtime = mtimeMs;
+        }
+      }
+    }
+  }
+  return latestPath;
+}
+
+function findLatestNestedSessionDir(sessionPath: string) {
+  if (!fs.existsSync(sessionPath)) return null;
+  const entries = fs.readdirSync(sessionPath, { withFileTypes: true });
+  const nested = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("session_"))
+    .map((entry) => path.join(sessionPath, entry.name));
+  if (!nested.length) return null;
+  nested.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return nested[0];
+}
+
+function resolveSessionFile(sessionPath: string, filename: string) {
+  const direct = path.join(sessionPath, filename);
+  if (fs.existsSync(direct)) return direct;
+  const nested = findLatestNestedSessionDir(sessionPath);
+  if (!nested) return null;
+  const nestedFile = path.join(nested, filename);
+  return fs.existsSync(nestedFile) ? nestedFile : null;
+}
+
 function createWindow() {
   const iconPath = path.join(
     process.env.VITE_PUBLIC!,
@@ -130,7 +201,10 @@ ipcMain.handle("tracking:status", () => {
 
 ipcMain.handle(
   "tracking:start",
-  async (_e, opts: { cam?: number; outDir?: string; script?: string; preview?: boolean } = {}) => {
+  async (
+    _e,
+    opts: { cam?: number; outDir?: string; script?: string; preview?: boolean; videoPath?: string } = {}
+  ) => {
     if (trackerProc && !trackerProc.killed) {
       return { ok: true, message: "already running" };
     }
@@ -149,6 +223,9 @@ ipcMain.handle(
     }
     if (opts.outDir) {
       args.push("--output-dir", opts.outDir);
+    }
+    if (opts.videoPath) {
+      args.push("--video", opts.videoPath);
     }
 
     try {
@@ -183,6 +260,26 @@ ipcMain.handle(
   }
 );
 
+ipcMain.handle("tracking:pick-video", async () => {
+  if (!win) return { ok: false, canceled: true, message: "window unavailable" };
+  try {
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select MP4 Recording",
+      properties: ["openFile"],
+      filters: [
+        { name: "MP4 Video", extensions: ["mp4"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: true, canceled: true };
+    }
+    const selectedPath = result.filePaths[0];
+    return { ok: true, canceled: false, path: selectedPath };
+  } catch (err: any) {
+    return { ok: false, canceled: false, message: String(err?.message ?? err) };
+  }
+});
+
 ipcMain.handle("tracking:stop", async () => {
   if (!trackerProc || trackerProc.killed) {
     return { ok: true, message: "not running" };
@@ -197,7 +294,7 @@ ipcMain.handle("tracking:stop", async () => {
 });
 
 ipcMain.handle("tracking:open-output", async () => {
-  const outDir = path.join(process.env.APP_ROOT!, "output");
+  const outDir = path.join(process.env.APP_ROOT!, "recordings");
   try {
     await shell.openPath(outDir);
     return { ok: true, path: outDir };
@@ -205,6 +302,572 @@ ipcMain.handle("tracking:open-output", async () => {
     return { ok: false, path: outDir };
   }
 });
+
+/* -------------------- Excel Analysis IPC -------------------- */
+
+ipcMain.handle("excel:pick-file", async () => {
+  if (!win) return { ok: false, canceled: true, message: "window unavailable" };
+  try {
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select Excel File",
+      properties: ["openFile"],
+      filters: [
+        { name: "Excel Files", extensions: ["xlsx", "xls"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: true, canceled: true };
+    }
+    const selectedPath = result.filePaths[0];
+    return { ok: true, canceled: false, path: selectedPath };
+  } catch (err: any) {
+    return { ok: false, canceled: false, message: String(err?.message ?? err) };
+  }
+});
+
+ipcMain.handle(
+  "excel:read",
+  async (
+    _e,
+    { filePath, sheetNumber, timeColumn }: { filePath: string; sheetNumber: number; timeColumn: number }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_excel.py");
+
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(
+          python,
+          [scriptPath, "read", filePath, String(sheetNumber), String(timeColumn)],
+          {
+            cwd: process.env.APP_ROOT!,
+          }
+        );
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "excel:fit",
+  async (
+    _e,
+    {
+      time,
+      signal,
+      mode,
+      frameRate,
+      beforeLim,
+      afterLim,
+    }: {
+      time: number[];
+      signal: number[];
+      mode: number;
+      frameRate: number;
+      beforeLim: number;
+      afterLim: number;
+    }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_excel.py");
+
+    try {
+      const inputData = JSON.stringify({
+        time,
+        signal,
+        mode,
+        frame_rate: frameRate,
+        before_lim: beforeLim,
+        after_lim: afterLim,
+      });
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "fit", inputData], {
+          cwd: process.env.APP_ROOT!,
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "excel:save",
+  async (
+    _e,
+    { results, filePath, filename }: { results: any[]; filePath: string; filename: string }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_excel.py");
+
+    try {
+      const inputData = JSON.stringify({
+        results,
+        file_path: filePath,
+        filename,
+      });
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "save", inputData], {
+          cwd: process.env.APP_ROOT!,
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+/* -------------------- Recording Analysis IPC -------------------- */
+
+ipcMain.handle(
+  "recording:read",
+  async (
+    _e,
+    { sessionId, signalType, filterLevel }: { sessionId: string; signalType: string; filterLevel?: string }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
+
+    try {
+      // Resolve the tracking data file path
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "Tracking data file not found" };
+      }
+
+      const filter = filterLevel || 'low';  // Default to 'low' if not specified
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(
+          python,
+          [scriptPath, "read", trackingPath, signalType, filter],
+          {
+            cwd: process.env.APP_ROOT!,
+          }
+        );
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result, filePath: trackingPath };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recording:detect-stimuli",
+  async (
+    _e,
+    {
+      sessionId,
+      signalType,
+      beforeLim,
+      afterLim,
+      filterLevel,
+    }: {
+      sessionId: string;
+      signalType: string;
+      beforeLim: number;
+      afterLim: number;
+      filterLevel?: string;
+    }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
+
+    try {
+      // Find recording_tracking_data.json file which contains:
+      // - timestamp_sec: timestamps for each frame
+      // - current_frame: stimulus name (for detecting changes)
+      // - gaze_x_raw, gaze_y_raw: raw gaze coordinates (filtered based on filterLevel)
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "recording_tracking_data.json file not found" };
+      }
+
+      const inputData = JSON.stringify({
+        file_path: trackingPath,
+        signal_type: signalType,
+        before_lim: beforeLim,
+        after_lim: afterLim,
+        filter_level: filterLevel || 'low',
+      });
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "detect-stimuli", inputData], {
+          cwd: process.env.APP_ROOT!,
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result, filePath: trackingPath };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recording:fit",
+  async (
+    _e,
+    {
+      time,
+      signal,
+      eventTimes,
+      beforeLim,
+      afterLim,
+    }: {
+      time: number[];
+      signal: number[];
+      eventTimes: number[];
+      beforeLim: number;
+      afterLim: number;
+    }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
+
+    try {
+      const inputData = JSON.stringify({
+        time,
+        signal,
+        event_times: eventTimes,
+        before_lim: beforeLim,
+        after_lim: afterLim,
+      });
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "fit", inputData], {
+          cwd: process.env.APP_ROOT!,
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recording:save",
+  async (
+    _e,
+    { results, filePath, sessionId }: { results: any[]; filePath: string; sessionId: string }
+  ) => {
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "analyze_recording.py");
+
+    try {
+      const inputData = JSON.stringify({
+        results,
+        file_path: filePath,
+        session_id: sessionId,
+      });
+
+      const result = await new Promise((resolve, reject) => {
+        const proc = spawn(python, [scriptPath, "save", inputData], {
+          cwd: process.env.APP_ROOT!,
+        });
+
+        let stdout = "";
+        let stderr = "";
+
+        proc.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        proc.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(stderr || `Process exited with code ${code}`));
+          } else {
+            try {
+              const data = JSON.parse(stdout);
+              resolve(data);
+            } catch (err) {
+              reject(new Error(`Failed to parse JSON: ${err}`));
+            }
+          }
+        });
+
+        proc.on("error", reject);
+      });
+
+      return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+/* -------------------- Recording Transitions IPC -------------------- */
+
+ipcMain.handle(
+  "recording:read-transitions",
+  async (_e, { sessionId }: { sessionId: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session folder not found" };
+      }
+
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, message: "Tracking data file not found" };
+      }
+
+      const raw = fs.readFileSync(trackingPath, "utf-8");
+      const data = parseJsonWithNaN(raw);
+      const frames = data?.frames ?? [];
+
+      // Build transitions list from current_frame (fallback to filename for old data)
+      interface TransitionEntry {
+        name: string;
+        startFrame: number;
+        startTime: number;
+        endFrame: number;
+        endTime: number;
+        duration: number;
+      }
+
+      const transitions: TransitionEntry[] = [];
+      let currentName: string | null = null;
+
+      for (const frame of frames) {
+        const frameName: string | null = frame.current_frame ?? frame.filename ?? null;
+        const frameNum: number = frame.frame ?? 0;
+        const timestamp: number = frame.timestamp_sec ?? 0;
+
+        if (frameName !== currentName) {
+          // Close previous transition
+          if (currentName !== null && transitions.length > 0) {
+            const last = transitions[transitions.length - 1];
+            last.endFrame = frameNum > 0 ? frameNum - 1 : 0;
+            last.endTime = timestamp;
+            last.duration = last.endTime - last.startTime;
+          }
+
+          // Start new transition if we have a valid name
+          if (frameName !== null) {
+            transitions.push({
+              name: frameName,
+              startFrame: frameNum,
+              startTime: timestamp,
+              endFrame: frameNum,
+              endTime: timestamp,
+              duration: 0,
+            });
+          }
+
+          currentName = frameName;
+        }
+      }
+
+      // Close the last transition
+      if (transitions.length > 0 && frames.length > 0) {
+        const lastFrame = frames[frames.length - 1];
+        const last = transitions[transitions.length - 1];
+        last.endFrame = lastFrame.frame ?? last.endFrame;
+        last.endTime = lastFrame.timestamp_sec ?? last.endTime;
+        last.duration = last.endTime - last.startTime;
+      }
+
+      return { ok: true, data: { transitions, totalFrames: frames.length } };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
 
 /* -------------------- Head Position IPC -------------------- */
 
@@ -297,6 +960,96 @@ ipcMain.handle("head_position:stop", async () => {
   return { ok: true, message: "stopped" };
 });
 
+/* -------------------- Live Gaze Stream IPC -------------------- */
+
+let gazeStreamProc: ChildProcessWithoutNullStreams | null = null;
+let gazeStreamBuffer = "";
+
+function stopGazeStreamProcess() {
+  if (gazeStreamProc && !gazeStreamProc.killed) {
+    try {
+      gazeStreamProc.kill();
+    } catch {
+      // ignore
+    }
+  }
+  gazeStreamProc = null;
+  gazeStreamBuffer = "";
+}
+
+function handleGazeStreamStdout(chunk: Buffer) {
+  gazeStreamBuffer += chunk.toString();
+  const lines = gazeStreamBuffer.split(/\r?\n/);
+  gazeStreamBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const payload = JSON.parse(trimmed);
+      if (payload?.type === "gaze" || payload?.type === "ready") {
+        win?.webContents.send("gaze_stream:update", payload);
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+}
+
+ipcMain.handle(
+  "gaze_stream:start",
+  async (_e, opts: { cam?: number; fps?: number; script?: string } = {}) => {
+    if (gazeStreamProc && !gazeStreamProc.killed) {
+      return { ok: true, message: "already running" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = opts.script
+      ? path.isAbsolute(opts.script)
+        ? opts.script
+        : path.join(process.env.APP_ROOT!, opts.script)
+      : path.join(process.env.APP_ROOT!, "tracker", "live_gaze_stream.py");
+
+    const args = [scriptPath];
+    if (typeof opts.cam === "number") {
+      args.push("--cam", String(opts.cam));
+    }
+    if (typeof opts.fps === "number") {
+      args.push("--fps", String(opts.fps));
+    }
+
+    try {
+      gazeStreamProc = spawn(python, args, {
+        cwd: process.env.APP_ROOT!,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+        },
+      });
+
+      gazeStreamProc.stdout.on("data", handleGazeStreamStdout);
+      gazeStreamProc.stderr.on("data", (buf) => {
+        const msg = buf.toString();
+        if (msg.trim()) {
+          console.warn("[gaze_stream]", msg.trim());
+        }
+      });
+      gazeStreamProc.on("close", () => {
+        gazeStreamProc = null;
+        gazeStreamBuffer = "";
+      });
+
+      return { ok: true, message: "started" };
+    } catch (err: any) {
+      gazeStreamProc = null;
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle("gaze_stream:stop", async () => {
+  stopGazeStreamProcess();
+  return { ok: true, message: "stopped" };
+});
 
 /* -------------------- Annotation IPC -------------------- */
 
@@ -340,6 +1093,157 @@ ipcMain.handle("recordings:list-folders", async () => {
   })).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 });
 
+ipcMain.handle("recordings:listSessions", async (_e, { limit = 20 }: { limit?: number } = {}) => {
+  const recDir = path.join(process.env.APP_ROOT!, "recordings");
+  if (!fs.existsSync(recDir)) return [];
+  const items = fs.readdirSync(recDir);
+  const dirs = items.filter((item) => {
+    const itemPath = path.join(recDir, item);
+    return fs.statSync(itemPath).isDirectory();
+  });
+  const sessions = dirs.map((name) => {
+    const dirPath = path.join(recDir, name);
+    const stat = fs.statSync(dirPath);
+    const mtimeMs = stat.mtimeMs;
+    const sortKey = mtimeMs || parseSessionTimestamp(name);
+    const reportPath = resolveSessionFile(dirPath, "calibration_report.json");
+    const pairsPath = resolveSessionFile(dirPath, "calibration_pairs.json");
+    const hasCalibration = !!reportPath && !!pairsPath;
+    return { sessionId: name, mtimeMs, sortKey, hasCalibration };
+  });
+  return sessions
+    .sort((a, b) => (b.sortKey || 0) - (a.sortKey || 0))
+    .slice(0, limit)
+    .map(({ sortKey: _sortKey, ...rest }) => rest);
+});
+
+ipcMain.handle(
+  "recordings:readJson",
+  async (_e, { sessionId, filename }: { sessionId: string; filename: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const safeFile = safePathSegment(filename);
+      const sessionPath = path.join(recDir, safeSession);
+      const filePath = resolveSessionFile(sessionPath, safeFile);
+      if (!filePath) {
+        return { ok: false, error: "File not found" };
+      }
+      const resolved = path.resolve(filePath);
+      const resolvedRoot = path.resolve(recDir);
+      if (!resolved.startsWith(resolvedRoot + path.sep)) {
+        return { ok: false, error: "Invalid path" };
+      }
+      const raw = fs.readFileSync(resolved, "utf-8");
+      const data = parseJsonWithNaN(raw);
+      return { ok: true, data };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recordings:readTracking",
+  async (_e, { sessionId }: { sessionId: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, error: "Session folder not found" };
+      }
+      const trackingPath = findLatestTrackingDataFile(sessionPath);
+      if (!trackingPath) {
+        return { ok: false, error: "Tracking data not found" };
+      }
+      const raw = fs.readFileSync(trackingPath, "utf-8");
+      const data = parseJsonWithNaN(raw);
+      return { ok: true, data, filename: path.basename(trackingPath) };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recordings:readCalibrationReport",
+  async (_e, { sessionId }: { sessionId: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, error: "Session folder not found" };
+      }
+
+      // Look for calibration_report.json in session subfolders
+      const findCalibrationReport = (dir: string): string | null => {
+        const files = fs.readdirSync(dir, { withFileTypes: true });
+        for (const file of files) {
+          const fullPath = path.join(dir, file.name);
+          if (file.isDirectory()) {
+            const found = findCalibrationReport(fullPath);
+            if (found) return found;
+          } else if (file.name === "calibration_report.json") {
+            return fullPath;
+          }
+        }
+        return null;
+      };
+
+      const reportPath = findCalibrationReport(sessionPath);
+      if (!reportPath) {
+        return { ok: false, error: "Calibration report not found" };
+      }
+
+      const raw = fs.readFileSync(reportPath, "utf-8");
+      const data = JSON.parse(raw);
+      return { ok: true, data, filename: path.basename(reportPath) };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+);
+
+ipcMain.handle("calibration:run", async (_e, { sessionId }: { sessionId: string }) => {
+  try {
+    const recDir = path.join(process.env.APP_ROOT!, "recordings");
+    const safeSession = safePathSegment(sessionId);
+    const sessionPath = path.join(recDir, safeSession);
+    if (!fs.existsSync(sessionPath)) {
+      return { ok: false, error: "Session folder not found" };
+    }
+
+    const python = resolvePython();
+    const scriptPath = path.join(process.env.APP_ROOT!, "tracker", "calibration_fit.py");
+
+    return await new Promise((resolve) => {
+      const proc = spawn(python, [scriptPath, sessionPath], {
+        cwd: process.env.APP_ROOT!,
+      });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (buf) => {
+        stdout += buf.toString();
+      });
+      proc.stderr.on("data", (buf) => {
+        stderr += buf.toString();
+      });
+      proc.on("close", (code) => {
+        resolve({
+          ok: code === 0,
+          code,
+          stdout,
+          stderr,
+        });
+      });
+    });
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+});
+
 ipcMain.handle("session:load-data", async (_e, folderPath: string) => {
   if (!fs.existsSync(folderPath)) return { ok: false, error: "Folder not found" };
 
@@ -356,7 +1260,7 @@ ipcMain.handle("session:load-data", async (_e, folderPath: string) => {
   let trackingData = null;
   if (trackingPath) {
     try {
-      trackingData = JSON.parse(fs.readFileSync(trackingPath, "utf-8"));
+      trackingData = parseJsonWithNaN(fs.readFileSync(trackingPath, "utf-8"));
     } catch (e) {
       console.error("Failed to parse tracking data", e);
     }
@@ -367,6 +1271,66 @@ ipcMain.handle("session:load-data", async (_e, folderPath: string) => {
     videoPath,
     trackingData
   };
+});
+
+ipcMain.handle("session:write-json", async (_e, { filePath, data }: { filePath: string; data: unknown }) => {
+  try {
+    const resolvedPath = path.isAbsolute(filePath)
+      ? filePath
+      : path.join(process.env.APP_ROOT!, filePath);
+    fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+    fs.writeFileSync(resolvedPath, JSON.stringify(data, null, 2));
+    return { ok: true, path: resolvedPath };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+});
+
+ipcMain.handle("session:get-video-path", async (_e, { sessionId }: { sessionId: string }) => {
+  try {
+    const recDir = path.join(process.env.APP_ROOT!, "recordings");
+    const safeSession = safePathSegment(sessionId);
+    const sessionPath = path.join(recDir, safeSession);
+
+    if (!fs.existsSync(sessionPath)) {
+      return { ok: false, error: "Session folder not found" };
+    }
+
+    // Look for video files recursively (session might be in nested subfolder)
+    // Prefer tracked video for visualization, fall back to original
+    const findVideoFile = (dir: string): string | null => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let trackedVideo: string | null = null;
+      let originalVideo: string | null = null;
+
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const found = findVideoFile(fullPath);
+          if (found) return found;
+        } else if (entry.isFile() && entry.name.endsWith(".mp4")) {
+          if (entry.name.includes("_tracked")) {
+            // Prefer tracked video (has ROI overlays)
+            trackedVideo = fullPath;
+          } else if (!originalVideo) {
+            // Save original video as fallback
+            originalVideo = fullPath;
+          }
+        }
+      }
+      // Return tracked video if available, otherwise original
+      return trackedVideo || originalVideo;
+    };
+
+    const videoPath = findVideoFile(sessionPath);
+    if (!videoPath) {
+      return { ok: false, error: "Video file not found" };
+    }
+
+    return { ok: true, path: videoPath };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 });
 
 /* -------------------- App lifecycle -------------------- */
@@ -414,6 +1378,7 @@ if (!gotLock) {
 
   app.on("before-quit", () => {
     stopHeadPositionProcess();
+    stopGazeStreamProcess();
   });
 
   app.on("window-all-closed", () => {

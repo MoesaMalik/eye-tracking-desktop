@@ -13,7 +13,7 @@ function subscribe<T extends any[]>(
 
 /* -------- Tracker-specific, typed bridge -------- */
 contextBridge.exposeInMainWorld("tracker", {
-  start: (opts: { cam?: number; outDir?: string; script?: string; preview?: boolean } = {}) =>
+  start: (opts: { cam?: number; outDir?: string; script?: string; preview?: boolean; videoPath?: string } = {}) =>
     ipcRenderer.invoke("tracking:start", opts),
   stop: () => ipcRenderer.invoke("tracking:stop"),
   onStdout: (cb: (line: string) => void) => subscribe("tracking:stdout", cb),
@@ -36,6 +36,17 @@ contextBridge.exposeInMainWorld("stopHeadPosition", () =>
 );
 contextBridge.exposeInMainWorld("onHeadPositionUpdate", (cb: (payload: any) => void) =>
   subscribe("head_position:update", cb)
+);
+
+/* -------- Gaze stream bridge -------- */
+contextBridge.exposeInMainWorld("startGazeStream", (opts: { cam?: number; fps?: number; script?: string } = {}) =>
+  ipcRenderer.invoke("gaze_stream:start", opts)
+);
+contextBridge.exposeInMainWorld("stopGazeStream", () =>
+  ipcRenderer.invoke("gaze_stream:stop")
+);
+contextBridge.exposeInMainWorld("onGazeUpdate", (cb: (payload: any) => void) =>
+  subscribe("gaze_stream:update", cb)
 );
 
 /* -------- Optional thin ipcRenderer exposure -------- */
