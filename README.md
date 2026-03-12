@@ -44,7 +44,7 @@ If you see version numbers, you're good to go! If you see "command not found", y
 
 ### Method 1: Using Antigravity (Recommended for Beginners)
 
-**Antigravity** is a helpful tool that makes setup easier. Y
+**Antigravity** is a helpful tool that makes setup easier. 
 
 1. Open Antigravity
 2. Point it to this project folder
@@ -167,7 +167,7 @@ The installer will be created in the `dist/` folder.
 
 ---
 
-## 🎯 How to Use the Application
+## How to Use the Application
 
 ### 1. **Add a Patient**
 
@@ -265,7 +265,7 @@ npm run dev
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 Here's what the main folders contain:
 
@@ -293,7 +293,7 @@ eye-tracking-desktop/
 
 ---
 
-## 🛟 Getting Help
+## Getting Help
 
 If you run into issues:
 
@@ -304,7 +304,7 @@ If you run into issues:
 
 ---
 
-## 🔐 Privacy Note
+## Privacy Note
 
 This application is designed for research with privacy in mind:
 - Patient records use anonymous codes (e.g., P-7G2Q)
@@ -314,7 +314,7 @@ This application is designed for research with privacy in mind:
 
 ---
 
-## 📝 Technical Details
+## Technical Details
 
 **For developers who want to know more:**
 
@@ -329,7 +329,7 @@ The app uses an Electron IPC bridge to communicate between the React frontend an
 
 ---
 
-## 🏗️ Development Commands (Advanced)
+## Development Commands (Advanced)
 
 ```bash
 # Linting (check code quality)
@@ -364,5 +364,3 @@ python -m tracker.live_gaze_stream --cam 0 --fps 30    # Live gaze stream
 - [ ] You should see the Eye-Tracking Desktop window open!
 
 ---
-
-**Good luck with your research! 👁️✨**
