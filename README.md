@@ -42,13 +42,30 @@ If you see version numbers, you're good to go! If you see "command not found", y
 
 ##  Setup Guide
 
-### Method 1: Using Antigravity (Recommended for Beginners)
+### Method 1: Quick Setup Script (Recommended)
 
-**Antigravity** is a helpful tool that makes setup easier. 
+A single script that handles the entire setup automatically:
 
-1. Open Antigravity
-2. Point it to this project folder
-3. Follow the on-screen instructions - Antigravity will handle most of the setup for you!
+1. Open your terminal and navigate to the project folder (see Method 2, Step 1-2 if you need help with this)
+2. Run:
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+The script will:
+- Verify Node.js, npm, and Python versions
+- Install Linux system libraries if needed (Ubuntu/Debian)
+- Create a Python virtual environment (`.venv`)
+- Install all Python dependencies
+- Install all Node.js/Electron dependencies
+- Verify the installation
+
+Once it finishes, start the app:
+```bash
+source .venv/bin/activate
+npm run dev
+```
 
 ---
 
@@ -288,6 +305,7 @@ eye-tracking-desktop/
 │   ├── protocols.json  # Protocol definitions
 │   └── assets/         # Slide images
 │
+├── setup.sh             # One-command setup script
 └── recordings/          # Session data (created automatically)
 ```
 
@@ -355,11 +373,8 @@ python -m tracker.live_gaze_stream --cam 0 --fps 30    # Live gaze stream
 
 - [ ] Install Node.js (20+)
 - [ ] Install Python (3.8+)
-- [ ] Open terminal and navigate to project folder
-- [ ] Create Python virtual environment (`.venv`)
+- [ ] Run `./setup.sh` **or** follow the manual steps
 - [ ] Activate virtual environment
-- [ ] Install Python dependencies (`pip install -r tracker/requirements.txt`)
-- [ ] Install Node dependencies (`npm ci`)
 - [ ] Run the app (`npm run dev`)
 - [ ] You should see the Eye-Tracking Desktop window open!
 
