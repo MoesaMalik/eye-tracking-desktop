@@ -47,7 +47,7 @@ export default function AnalyzeVideo() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [signalType, setSignalType] = useState<string>("gaze_xy");
-  const [filterLevel, setFilterLevel] = useState<string>("low"); // raw, low, med, high
+  const [filterLevel, setFilterLevel] = useState<string>("raw"); // raw, low, med, high
   const [timeData, setTimeData] = useState<number[]>([]);
   const [signalData, setSignalData] = useState<number[]>([]);
   const [signalName, setSignalName] = useState<string>("");
@@ -65,6 +65,7 @@ export default function AnalyzeVideo() {
   const [eventTimes, setEventTimes] = useState<number[]>([]);
   const [stimuliInfo, setStimuliInfo] = useState<StimuliInfo[]>([]);
   const [manualEventInput, setManualEventInput] = useState<string>("");
+  const [jumpThreshold, setJumpThreshold] = useState<number>(50); // Threshold for detecting big jumps
 
   // Results state
   const [fitResults, setFitResults] = useState<FitResult[]>([]);
@@ -77,6 +78,7 @@ export default function AnalyzeVideo() {
   const [showVideo, setShowVideo] = useState<boolean>(true);
   const [markerTime, setMarkerTime] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // UI state
   const [loading, setLoading] = useState<boolean>(false);
@@ -142,12 +144,116 @@ export default function AnalyzeVideo() {
     return map;
   }, [transitions]);
 
-  // Seek video to marker position
+  // Seek video to marker position and render eye ROIs
   useEffect(() => {
     if (markerTime !== null && videoRef.current && videoRef.current.readyState >= 2) {
       videoRef.current.currentTime = markerTime;
     }
   }, [markerTime]);
+
+  // Render eye ROIs on canvas when video frame is ready
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    if (!video || !canvas || !showVideo || markerTime === null || trackingFrames.length === 0) {
+      return;
+    }
+
+    const renderEyeROIs = () => {
+      // Find the tracking frame closest to the current marker time
+      const frame = trackingFrames.reduce((prev, curr) => {
+        const prevDiff = Math.abs((prev.timestamp_sec || 0) - markerTime);
+        const currDiff = Math.abs((curr.timestamp_sec || 0) - markerTime);
+        return currDiff < prevDiff ? curr : prev;
+      });
+
+      // Check if we have ROI data
+      if (!frame ||
+          frame.left_roi_x0 === undefined ||
+          frame.right_roi_x0 === undefined) {
+        // If no ROI data, just show the full frame
+        const ctx = canvas.getContext('2d');
+        if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0);
+        }
+        return;
+      }
+
+      // Extract ROI coordinates
+      const leftROI = {
+        x0: frame.left_roi_x0,
+        y0: frame.left_roi_y0,
+        x1: frame.left_roi_x1,
+        y1: frame.left_roi_y1,
+      };
+      const rightROI = {
+        x0: frame.right_roi_x0,
+        y0: frame.right_roi_y0,
+        x1: frame.right_roi_x1,
+        y1: frame.right_roi_y1,
+      };
+
+      // Calculate ROI dimensions
+      const leftWidth = leftROI.x1 - leftROI.x0;
+      const leftHeight = leftROI.y1 - leftROI.y0;
+      const rightWidth = rightROI.x1 - rightROI.x0;
+      const rightHeight = rightROI.y1 - rightROI.y0;
+
+      // Set canvas size to fit both ROIs side by side
+      const padding = 20;
+      const maxHeight = Math.max(leftHeight, rightHeight);
+      canvas.width = leftWidth + rightWidth + padding * 3;
+      canvas.height = maxHeight + padding * 2;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx || video.videoWidth === 0 || video.videoHeight === 0) {
+        return;
+      }
+
+      // Clear canvas
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw left eye ROI
+      ctx.drawImage(
+        video,
+        leftROI.x0, leftROI.y0, leftWidth, leftHeight,
+        padding, padding + (maxHeight - leftHeight) / 2, leftWidth, leftHeight
+      );
+
+      // Draw right eye ROI
+      ctx.drawImage(
+        video,
+        rightROI.x0, rightROI.y0, rightWidth, rightHeight,
+        leftWidth + padding * 2, padding + (maxHeight - rightHeight) / 2, rightWidth, rightHeight
+      );
+
+      // Add labels
+      ctx.fillStyle = '#00ff00';
+      ctx.font = '14px monospace';
+      ctx.fillText('Left Eye', padding + 5, padding + 20);
+      ctx.fillText('Right Eye', leftWidth + padding * 2 + 5, padding + 20);
+    };
+
+    // Render when video seeks to the new time
+    const handleSeeked = () => {
+      renderEyeROIs();
+    };
+
+    video.addEventListener('seeked', handleSeeked);
+
+    // Also render immediately if video is already at the right time
+    if (Math.abs(video.currentTime - markerTime) < 0.1) {
+      renderEyeROIs();
+    }
+
+    return () => {
+      video.removeEventListener('seeked', handleSeeked);
+    };
+  }, [markerTime, showVideo, trackingFrames]);
 
   // Handle chart click to set marker
   const handleChartClick = (e: any) => {
@@ -320,6 +426,84 @@ export default function AnalyzeVideo() {
     }
   }
 
+  async function handleAutoDetectEvents() {
+    if (!timeData.length || !signalData.length) {
+      setError("No data loaded. Please load session data first.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      // Calculate differences between consecutive signal points
+      const diffs: number[] = [];
+      for (let i = 1; i < signalData.length; i++) {
+        const diff = Math.abs(signalData[i] - signalData[i - 1]);
+        diffs.push(diff);
+      }
+
+      // Find indices where the difference exceeds the threshold
+      const detectedEventIndices: number[] = [];
+      for (let i = 0; i < diffs.length; i++) {
+        if (diffs[i] > jumpThreshold) {
+          // Check if this is too close to a previous event (avoid duplicates)
+          const tooClose = detectedEventIndices.some((prevIdx) => {
+            const timeDiff = Math.abs(timeData[i + 1] - timeData[prevIdx + 1]);
+            return timeDiff < 0.2; // Minimum 200ms between events
+          });
+          if (!tooClose) {
+            detectedEventIndices.push(i);
+          }
+        }
+      }
+
+      if (detectedEventIndices.length === 0) {
+        setError(`No jumps detected above threshold ${jumpThreshold}. Try lowering the threshold.`);
+        setLoading(false);
+        return;
+      }
+
+      // Convert indices to event times
+      const detectedEventTimes = detectedEventIndices.map((idx) => timeData[idx + 1]);
+
+      // Fit the detected events
+      const result = await fitRecordingData({
+        time: timeData,
+        signal: signalData,
+        eventTimes: detectedEventTimes,
+        beforeLim,
+        afterLim,
+      });
+
+      if (!result.ok) {
+        setError(result.message ?? "Failed to fit data");
+        setLoading(false);
+        return;
+      }
+
+      if (result.data?.error) {
+        setError(result.data.error);
+        setLoading(false);
+        return;
+      }
+
+      if (result.data?.results) {
+        setEventTimes(detectedEventTimes);
+        setFitResults(result.data.results);
+        const successCount = result.data.results.filter((r) => !r.error).length;
+        setMessage(
+          `Auto-detected ${detectedEventTimes.length} events (threshold: ${jumpThreshold}), fitted ${successCount} successfully`
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleSave() {
     if (!fitResults.length) {
       setError("No results to save. Please run analysis first.");
@@ -402,7 +586,10 @@ export default function AnalyzeVideo() {
   }, [selectedSessionId]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6 animate-fade-in">
+      {/* Decorative blur orb */}
+      <div className="fixed top-20 right-20 w-96 h-96 bg-gradient-to-br from-blue-400/20 via-purple-400/20 to-pink-400/20 rounded-full blur-3xl pointer-events-none" />
+
       {/* Hidden video element for seeking */}
       {videoPath && (
         <video
@@ -416,21 +603,19 @@ export default function AnalyzeVideo() {
       )}
 
       <div>
-        <h1 className="text-xl font-semibold">Analyze Recording Data</h1>
-        <p className="text-sm text-gray-600">
-          Load tracking data from <code className="bg-gray-100 px-1 rounded">recording_tracking_data.json</code> files.
-          Uses <code className="bg-gray-100 px-1 rounded">timestamp_sec</code> for event times,
-          <code className="bg-gray-100 px-1 rounded">current_frame</code> for stimulus detection, and
-          <code className="bg-gray-100 px-1 rounded">gaze_x, gaze_y</code> (OneEuroFilter smoothed) for gaze coordinates.
-          Click "Fit Events" to detect stimulus changes and fit exponential curves.
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-gray-900 via-blue-900 to-purple-900 bg-clip-text text-transparent">
+          Analyze Recording Data
+        </h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Load tracking data, detect stimulus changes, and fit exponential curves to eye movement responses
         </p>
       </div>
 
       {/* Session Selection and Controls */}
-      <div className="rounded-lg border bg-white p-4 space-y-3">
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <select
-            className="px-3 py-1.5 rounded border bg-white disabled:opacity-50 min-w-[300px]"
+            className="border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50 disabled:opacity-50 min-w-[300px]"
             value={selectedSessionId}
             onChange={(e) => setSelectedSessionId(e.target.value)}
             disabled={loading}
@@ -443,21 +628,21 @@ export default function AnalyzeVideo() {
             ))}
           </select>
           <button
-            className="px-3 py-1.5 rounded border bg-white disabled:opacity-50"
+            className="px-4 py-2 rounded-lg border-2 border-gray-200 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 transition-all disabled:opacity-50"
             onClick={handleLoadData}
             disabled={loading || !selectedSessionId}
           >
             {loading ? "Loading..." : "Load Data"}
           </button>
           <button
-            className="px-3 py-1.5 rounded border bg-blue-500 text-white disabled:opacity-50"
+            className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 text-white text-sm font-medium hover:from-blue-700 hover:to-purple-700 transition-all shadow-sm disabled:opacity-50"
             onClick={handleFitEvents}
             disabled={loading || !selectedSessionId}
           >
             {loading ? "Fitting..." : "Fit Events"}
           </button>
           <button
-            className="px-3 py-1.5 rounded border bg-green-500 text-white disabled:opacity-50"
+            className="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-medium hover:from-emerald-700 hover:to-teal-700 transition-all shadow-sm disabled:opacity-50"
             onClick={handleSave}
             disabled={loading || !fitResults.length}
           >
@@ -466,8 +651,8 @@ export default function AnalyzeVideo() {
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded border bg-gray-50 p-3">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Selected Session</div>
+          <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">Selected Session</div>
             <div className="mt-1 text-sm font-medium">{selectedSessionId || "No session selected"}</div>
             {loadedFilePath && (
               <div className="mt-1 text-xs text-gray-500 font-mono break-all">
@@ -480,8 +665,8 @@ export default function AnalyzeVideo() {
               </div>
             )}
           </div>
-          <div className="rounded border bg-gray-50 p-3">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Data Info</div>
+          <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">Data Info</div>
             <div className="mt-1 text-sm">
               Points: <b>{timeData.length}</b>
             </div>
@@ -499,7 +684,7 @@ export default function AnalyzeVideo() {
           <div>
             <label className="text-xs text-gray-600">Signal Type</label>
             <select
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={signalType}
               onChange={(e) => setSignalType(e.target.value)}
               disabled={loading}
@@ -514,7 +699,7 @@ export default function AnalyzeVideo() {
           <div>
             <label className="text-xs text-gray-600">Filter Level</label>
             <select
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={filterLevel}
               onChange={(e) => setFilterLevel(e.target.value)}
               disabled={loading}
@@ -532,7 +717,7 @@ export default function AnalyzeVideo() {
             </label>
             <input
               type="number"
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={tMin}
               onChange={(e) => setTMin(Number(e.target.value))}
               step={0.1}
@@ -544,7 +729,7 @@ export default function AnalyzeVideo() {
             </label>
             <input
               type="number"
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={tMax}
               onChange={(e) => setTMax(Number(e.target.value))}
               step={0.1}
@@ -554,7 +739,7 @@ export default function AnalyzeVideo() {
             <label className="text-xs text-gray-600">Before Event (s)</label>
             <input
               type="number"
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={beforeLim}
               onChange={(e) => setBeforeLim(Number(e.target.value))}
               step={0.1}
@@ -564,12 +749,41 @@ export default function AnalyzeVideo() {
             <label className="text-xs text-gray-600">After Event (s)</label>
             <input
               type="number"
-              className="w-full px-2 py-1 text-sm border rounded"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               value={afterLim}
               onChange={(e) => setAfterLim(Number(e.target.value))}
               step={0.1}
             />
           </div>
+        </div>
+
+        {/* Auto-Detect Events */}
+        <div className="border-t pt-3">
+          <label className="text-xs text-gray-600 block mb-1">Auto-Detect Events (for imported videos without slide markers)</label>
+          <div className="flex gap-2">
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-600">Jump Threshold:</label>
+              <input
+                type="number"
+                className="w-24 border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
+                value={jumpThreshold}
+                onChange={(e) => setJumpThreshold(Number(e.target.value))}
+                step={5}
+                min={5}
+                disabled={loading}
+              />
+            </div>
+            <button
+              className="px-4 py-2 rounded-lg bg-gradient-to-r from-orange-500 to-amber-500 text-white text-sm font-medium hover:from-orange-600 hover:to-amber-600 transition-all shadow-sm disabled:opacity-50"
+              onClick={handleAutoDetectEvents}
+              disabled={loading || !timeData.length}
+            >
+              Auto-Detect & Fit Events
+            </button>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            Detects large jumps in signal as event changes. Increase threshold if too many events detected.
+          </p>
         </div>
 
         {/* Manual Event Input */}
@@ -578,14 +792,14 @@ export default function AnalyzeVideo() {
           <div className="flex gap-2">
             <input
               type="text"
-              className="flex-1 px-2 py-1 text-sm border rounded"
+              className="flex-1 border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50"
               placeholder="e.g., 1.5, 3.2, 5.8, 10.1"
               value={manualEventInput}
               onChange={(e) => setManualEventInput(e.target.value)}
               disabled={loading}
             />
             <button
-              className="px-3 py-1 rounded border bg-purple-500 text-white disabled:opacity-50"
+              className="px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-pink-600 text-white text-sm font-medium hover:from-purple-700 hover:to-pink-700 transition-all shadow-sm disabled:opacity-50"
               onClick={handleManualFit}
               disabled={loading || !timeData.length}
             >
@@ -594,15 +808,15 @@ export default function AnalyzeVideo() {
           </div>
         </div>
 
-        {error && <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+        {error && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
         {message && (
-          <div className="rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{message}</div>
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>
         )}
       </div>
 
       {/* Main Chart */}
       {mainChartData.length > 0 && (
-        <div className="rounded-lg border bg-white p-4">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
           <div className="text-sm font-medium mb-2">
             {signalName} Signal
             {eventTimes.length > 0 && (
@@ -649,9 +863,9 @@ export default function AnalyzeVideo() {
 
       {/* Video Player Section */}
       {mainChartData.length > 0 && videoPath && (
-        <div className="rounded-lg border bg-white p-4">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
           <div className="flex items-center justify-between mb-2">
-            <div className="text-sm font-medium">Tracked Video Preview</div>
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">Eye ROI Preview</div>
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -667,20 +881,15 @@ export default function AnalyzeVideo() {
             <div className="space-y-2">
               <div className="text-xs text-gray-600">
                 {markerTime !== null ? (
-                  <span>Showing frame at: {markerTime.toFixed(3)}s (Click on chart to change position)</span>
+                  <span>Showing eye ROIs at: {markerTime.toFixed(3)}s (Click on chart to change position)</span>
                 ) : (
                   <span>Click on the chart above to select a timestamp</span>
                 )}
               </div>
-              <video
-                ref={videoRef}
-                src={videoPath}
+              <canvas
+                ref={canvasRef}
                 className="w-full h-auto rounded bg-black"
                 style={{ maxHeight: 400 }}
-                controls
-                muted
-                playsInline
-                preload="auto"
               />
             </div>
           )}
@@ -689,27 +898,29 @@ export default function AnalyzeVideo() {
 
       {/* Stimuli Timeline */}
       {transitions.length > 0 && (
-        <div className="rounded-lg border bg-white">
-          <div className="px-3 py-2 border-b text-sm font-medium">
-            Stimuli Timeline
-            <span className="ml-2 text-xs text-gray-500">({transitions.length} segments)</span>
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">
+              Stimuli Timeline
+              <span className="ml-2 text-xs text-gray-500 normal-case tracking-normal">({transitions.length} segments)</span>
+            </div>
           </div>
           <div className="p-3 max-h-[350px] overflow-auto">
             <table className="min-w-full text-xs border">
-              <thead className="bg-gray-50 sticky top-0">
+              <thead className="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0">
                 <tr>
-                  <th className="px-2 py-1 border text-left">#</th>
-                  <th className="px-2 py-1 border text-left">Stimulus</th>
-                  <th className="px-2 py-1 border text-right">Start Time (s)</th>
-                  <th className="px-2 py-1 border text-right">End Time (s)</th>
-                  <th className="px-2 py-1 border text-right">Duration (s)</th>
-                  <th className="px-2 py-1 border text-right">Frames</th>
-                  <th className="px-2 py-1 border text-center">Color</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">#</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Stimulus</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Start Time (s)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">End Time (s)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Duration (s)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Frames</th>
+                  <th className="px-2 py-1 border text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Color</th>
                 </tr>
               </thead>
               <tbody>
                 {transitions.map((t, idx) => (
-                  <tr key={idx}>
+                  <tr key={idx} className="hover:bg-blue-50/30 transition-colors">
                     <td className="px-2 py-1 border">{idx + 1}</td>
                     <td className="px-2 py-1 border text-left font-mono text-xs">{t.name}</td>
                     <td className="px-2 py-1 border text-right">{t.startTime.toFixed(3)}</td>
@@ -732,23 +943,25 @@ export default function AnalyzeVideo() {
 
       {/* Visual Stimuli Changes (from Auto-Fit) */}
       {stimuliInfo.length > 0 && (
-        <div className="rounded-lg border bg-white">
-          <div className="px-3 py-2 border-b text-sm font-medium">Visual Stimuli Changes (Detected)</div>
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">Visual Stimuli Changes (Detected)</div>
+          </div>
           <div className="p-3 max-h-[300px] overflow-auto">
             <table className="min-w-full text-xs border">
-              <thead className="bg-gray-50 sticky top-0">
+              <thead className="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0">
                 <tr>
-                  <th className="px-2 py-1 border text-left">#</th>
-                  <th className="px-2 py-1 border text-right">Frame</th>
-                  <th className="px-2 py-1 border text-right">Time (s)</th>
-                  <th className="px-2 py-1 border text-left">From</th>
-                  <th className="px-2 py-1 border text-left">To</th>
-                  <th className="px-2 py-1 border text-right">Slide Change</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">#</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Frame</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Time (s)</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">From</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">To</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Slide Change</th>
                 </tr>
               </thead>
               <tbody>
                 {stimuliInfo.map((info, idx) => (
-                  <tr key={idx}>
+                  <tr key={idx} className="hover:bg-blue-50/30 transition-colors">
                     <td className="px-2 py-1 border">{idx + 1}</td>
                     <td className="px-2 py-1 border text-right">{info.frame}</td>
                     <td className="px-2 py-1 border text-right">{info.time.toFixed(3)}</td>
@@ -767,27 +980,29 @@ export default function AnalyzeVideo() {
 
       {/* Fitted Parameters Results */}
       {fitResults.length > 0 && (
-        <div className="rounded-lg border bg-white">
-          <div className="px-3 py-2 border-b text-sm font-medium">Fitted Parameters</div>
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="px-4 py-3 border-b border-gray-200">
+            <div className="text-xs font-medium text-gray-400 uppercase tracking-wider">Fitted Parameters</div>
+          </div>
           <div className="p-3 max-h-[500px] overflow-auto">
             <table className="min-w-full text-xs border">
-              <thead className="bg-gray-50 sticky top-0">
+              <thead className="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0">
                 <tr>
-                  <th className="px-2 py-1 border text-left">#</th>
-                  <th className="px-2 py-1 border text-right">Event Time (s)</th>
-                  <th className="px-2 py-1 border text-right">a (baseline)</th>
-                  <th className="px-2 py-1 border text-right">b (amplitude)</th>
-                  <th className="px-2 py-1 border text-right">τ (tau)</th>
-                  <th className="px-2 py-1 border text-right">d (delay)</th>
-                  <th className="px-2 py-1 border text-right">Fit Before</th>
-                  <th className="px-2 py-1 border text-right">Fit During</th>
-                  <th className="px-2 py-1 border text-right">Fit After</th>
-                  <th className="px-2 py-1 border text-left">Status</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">#</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Event Time (s)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">a (baseline)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">b (amplitude)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">τ (tau)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">d (delay)</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Fit Before</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Fit During</th>
+                  <th className="px-2 py-1 border text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Fit After</th>
+                  <th className="px-2 py-1 border text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {fitResults.map((result) => (
-                  <tr key={result.index} className={result.error ? "bg-red-50" : ""}>
+                  <tr key={result.index} className={result.error ? "bg-red-50" : "hover:bg-blue-50/30 transition-colors"}>
                     <td className="px-2 py-1 border">{result.index}</td>
                     <td className="px-2 py-1 border text-right">{result.event_time.toFixed(3)}</td>
                     <td className="px-2 py-1 border text-right">
@@ -828,13 +1043,13 @@ export default function AnalyzeVideo() {
 
       {/* Detail Plots with Fitted Curves */}
       {fitResults.length > 0 && (
-        <div className="rounded-lg border bg-white p-4">
-          <div className="text-sm font-medium mb-3">Detail Views with Fitted Curves</div>
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
+          <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">Detail Views with Fitted Curves</div>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {fitResults.slice(0, 24).map((result, idx) => {
               if (!result.t_fit || !result.s_original || !result.s_fitted) {
                 return (
-                  <div key={idx} className="border rounded p-2 bg-gray-50">
+                  <div key={idx} className="border rounded-lg p-2 bg-gray-50">
                     <div className="text-xs text-center text-gray-500">Event {idx}</div>
                     <div className="text-xs text-center text-red-500">{result.error || "No data"}</div>
                   </div>
@@ -848,7 +1063,7 @@ export default function AnalyzeVideo() {
               }));
 
               return (
-                <div key={idx} className="border rounded p-2">
+                <div key={idx} className="border rounded-lg p-2">
                   <div className="text-xs text-center mb-1">Event {idx}</div>
                   <ResponsiveContainer width="100%" height={150}>
                     <LineChart data={chartData}>

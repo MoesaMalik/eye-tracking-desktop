@@ -88,7 +88,7 @@ export default function Validation() {
     const [baselineComparison, setBaselineComparison] = useState<BaselineComparison | null>(null);
     const [usingBaselineSequence, setUsingBaselineSequence] = useState(false);
     const [currentTrialNum, setCurrentTrialNum] = useState(0);
-    const [liveGaze, setLiveGaze] = useState<{ x: number; y: number } | null>(null);
+    const [_liveGaze, setLiveGaze] = useState<{ x: number; y: number } | null>(null);
     const [livePredicted, setLivePredicted] = useState<{ x: number; y: number } | null>(null);
     const [liveClassified, setLiveClassified] = useState<CalibrationTarget | null>(null);
 

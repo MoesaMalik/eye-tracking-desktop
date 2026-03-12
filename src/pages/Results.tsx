@@ -1,59 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { usePatientStore } from "../store/patientStore";
 import type { Patient, SessionSummary } from "../types";
-
-type TrackingFrame = {
-  filename?: string;
-  protocol_key?: string;
-  slide_index?: number;
-  gaze_x?: number | null;
-  gaze_y?: number | null;
-  gaze_x_raw?: number | null;
-  gaze_y_raw?: number | null;
-  left_center_x?: number | null;
-  left_center_y?: number | null;
-  right_center_x?: number | null;
-  right_center_y?: number | null;
-  is_blink?: boolean;
-};
-
-type CalibrationTarget = {
-  filename: string;
-  x: number;
-  y: number;
-  n_frames: number;
-  valid_frames_used: number;
-  eye_avg_x: number;
-  eye_avg_y: number;
-  x_variance?: number;
-  y_variance?: number;
-  gaze_settling_time_ms?: number;
-  stability_threshold_px?: number;
-  stable_found?: boolean;
-  avg_frame_variance_px2?: number;
-  jitter_rms_px?: number;
-  left_avg_x?: number;
-  left_avg_y?: number;
-  right_avg_x?: number;
-  right_avg_y?: number;
-  valid: boolean;
-  error_px?: number;
-};
-
-type SlideAccumulator = {
-  key: string;
-  filename: string;
-  protocol: string | null;
-  index: number | null;
-  count: number;
-  sumX: number;
-  sumY: number;
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-};
+import { ShimmerButton } from "../components/ui/shimmer-button";
 
 type SlideRow = {
   key: string;
@@ -67,6 +16,7 @@ type SlideRow = {
   rerunGST: number | null;
   baselineJitter: number | null;
   rerunJitter: number | null;
+  diffPct?: number;
   pctScreenDiag: number;
   screenW: number;
   screenH: number;
@@ -79,177 +29,10 @@ function invokeIpc(channel: string, payload?: unknown) {
   return Promise.resolve({ ok: false, error: "IPC not available" });
 }
 
-function toFrames(payload: any): TrackingFrame[] {
-  if (!payload) return [];
-  if (Array.isArray(payload)) return payload as TrackingFrame[];
-  if (Array.isArray(payload.frames)) return payload.frames as TrackingFrame[];
-  return [];
-}
-
-function getGazePoint(frame: TrackingFrame) {
-  // Calculate eye_avg_x and eye_avg_y exactly like calibration_report.json
-  // eye_avg_x = (left_center_x + right_center_x) / 2.0
-  // eye_avg_y = (left_center_y + right_center_y) / 2.0
-
-  const leftX = typeof frame.left_center_x === "number" ? frame.left_center_x : null;
-  const leftY = typeof frame.left_center_y === "number" ? frame.left_center_y : null;
-  const rightX = typeof frame.right_center_x === "number" ? frame.right_center_x : null;
-  const rightY = typeof frame.right_center_y === "number" ? frame.right_center_y : null;
-
-  let x: number | null = null;
-  let y: number | null = null;
-
-  // Use binocular average if both eyes available
-  if (leftX !== null && rightX !== null && leftY !== null && rightY !== null) {
-    x = (leftX + rightX) / 2.0;
-    y = (leftY + rightY) / 2.0;
-  } else if (leftX !== null && leftY !== null) {
-    // Use left eye only
-    x = leftX;
-    y = leftY;
-  } else if (rightX !== null && rightY !== null) {
-    // Use right eye only
-    x = rightX;
-    y = rightY;
-  }
-
-  if (x === null || y === null) return null;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x, y };
-}
-
-function slideKey(frame: TrackingFrame) {
-  if (!frame.filename) return null;
-  const protocol = frame.protocol_key ?? "";
-  const index = typeof frame.slide_index === "number" ? frame.slide_index : "";
-  return `${protocol}::${frame.filename}::${index}`;
-}
-
-function slideLabel(acc: SlideAccumulator) {
-  let label = acc.filename;
-  if (acc.protocol) label = `${acc.protocol} / ${acc.filename}`;
-  if (typeof acc.index === "number") label += ` (slide ${acc.index + 1})`;
-  return label;
-}
-
-function collectSlides(frames: TrackingFrame[]) {
-  const map = new Map<string, SlideAccumulator>();
-  // Track frame counts per slide to skip first 5 frames
-  const frameCountPerSlide = new Map<string, number>();
-
-  for (const frame of frames) {
-    if (!frame.filename) continue;
-    const key = slideKey(frame);
-    if (!key) continue;
-
-    // Skip frames where person is blinking
-    if (frame.is_blink === true) continue;
-
-    // Track frame order for this slide
-    const frameCount = (frameCountPerSlide.get(key) ?? 0) + 1;
-    frameCountPerSlide.set(key, frameCount);
-
-    // Skip first 5 frames for each slide
-    if (frameCount <= 5) continue;
-
-    const gaze = getGazePoint(frame);
-    if (!gaze) continue;
-    const protocol = frame.protocol_key ?? null;
-    const index = typeof frame.slide_index === "number" ? frame.slide_index : null;
-
-    let acc = map.get(key);
-    if (!acc) {
-      acc = {
-        key,
-        filename: frame.filename,
-        protocol,
-        index,
-        count: 0,
-        sumX: 0,
-        sumY: 0,
-        minX: gaze.x,
-        maxX: gaze.x,
-        minY: gaze.y,
-        maxY: gaze.y,
-      };
-      map.set(key, acc);
-    }
-
-    acc.count += 1;
-    acc.sumX += gaze.x;
-    acc.sumY += gaze.y;
-    acc.minX = Math.min(acc.minX, gaze.x);
-    acc.maxX = Math.max(acc.maxX, gaze.x);
-    acc.minY = Math.min(acc.minY, gaze.y);
-    acc.maxY = Math.max(acc.maxY, gaze.y);
-  }
-  return map;
-}
-
 type ScreenSize = {
   width: number;
   height: number;
 };
-
-function compareSlides(
-  baseline: Map<string, SlideAccumulator>,
-  rerun: Map<string, SlideAccumulator>,
-  screen: ScreenSize
-) {
-  const rows: SlideRow[] = [];
-  const missingBaseline: string[] = [];
-  const missingRerun: string[] = [];
-  const keys = new Set([...baseline.keys(), ...rerun.keys()]);
-  const screenW = Math.max(0, screen.width);
-  const screenH = Math.max(0, screen.height);
-  const screenDiag = Math.hypot(screenW, screenH);
-
-  for (const key of keys) {
-    const base = baseline.get(key);
-    const run = rerun.get(key);
-    if (!base && run) {
-      missingBaseline.push(slideLabel(run));
-      continue;
-    }
-    if (!run && base) {
-      missingRerun.push(slideLabel(base));
-      continue;
-    }
-    if (!base || !run) continue;
-    if (base.count === 0 || run.count === 0) continue;
-
-    const baseMeanX = base.sumX / base.count;
-    const baseMeanY = base.sumY / base.count;
-    const runMeanX = run.sumX / run.count;
-    const runMeanY = run.sumY / run.count;
-    const distance = Math.hypot(baseMeanX - runMeanX, baseMeanY - runMeanY);
-    const minX = Math.min(base.minX, run.minX);
-    const maxX = Math.max(base.maxX, run.maxX);
-    const minY = Math.min(base.minY, run.minY);
-    const maxY = Math.max(base.maxY, run.maxY);
-    const scale = Math.hypot(maxX - minX, maxY - minY);
-    const diffPct = scale > 0 ? Math.min(100, (distance / scale) * 100) : (distance === 0 ? 0 : 100);
-    const pctScreenDiag = screenDiag > 0 ? (distance / screenDiag) * 100 : 0;
-
-    rows.push({
-      key,
-      label: slideLabel(base),
-      baselineCount: base.count,
-      rerunCount: run.count,
-      baselineMean: { x: baseMeanX, y: baseMeanY },
-      rerunMean: { x: runMeanX, y: runMeanY },
-      distance,
-      diffPct,
-      pctScreenDiag,
-      screenW,
-      screenH,
-      screenDiag,
-    });
-  }
-
-  rows.sort((a, b) => a.label.localeCompare(b.label));
-  return { rows, missingBaseline, missingRerun };
-}
 
 function resolveScreenSize(): ScreenSize {
   if (typeof window === "undefined") return { width: 0, height: 0 };
@@ -432,8 +215,8 @@ export default function Results() {
     comparisonRows.sort((a, b) => a.label.localeCompare(b.label));
 
     setRows(comparisonRows);
-    setMissingBaseline(missing.filter(f => !rerunTargets.find(t => t.filename === f)));
-    setMissingRerun(missing.filter(f => !baseTargets.find(t => t.filename === f)));
+    setMissingBaseline(missing.filter((f: string) => !rerunTargets.find((t: any) => t.filename === f)));
+    setMissingRerun(missing.filter((f: string) => !baseTargets.find((t: any) => t.filename === f)));
     setLoading(false);
   }
 
@@ -441,182 +224,240 @@ export default function Results() {
   const hasSessions = sessions.length > 0;
 
   return (
-    <div className="p-6 space-y-4">
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">Results</h1>
-        {selectedPatient ? (
-          <span className="text-sm text-gray-600">
-            Patient: <b>{selectedPatient.code}</b>
-          </span>
-        ) : null}
+    <div className="space-y-6 animate-fade-in">
+      {/* Page Header */}
+      <div className="relative">
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-gray-900 via-blue-900 to-purple-900 bg-clip-text text-transparent">
+          Results
+        </h1>
+        <p className="text-sm text-gray-500 mt-2">
+          Compare baseline and rerun sessions to track patient progress.
+        </p>
+        <div className="absolute -top-2 -left-2 w-20 h-20 bg-gradient-to-br from-blue-500/10 to-purple-500/10 rounded-full blur-2xl -z-10" />
       </div>
 
-      <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
-        <label className="text-sm text-gray-600">Patient</label>
-        <select
-          className="px-3 py-2 border rounded-lg bg-white"
-          value={selectedPatientId}
-          onChange={(e) => {
-            const id = e.target.value;
-            setSelectedPatientId(id);
-            setParams(id ? { patient: id } : {});
-          }}
-        >
-          <option value="">Select patient...</option>
-          {patients.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code} {p.initials ? `(${p.initials})` : ""}
-            </option>
-          ))}
-        </select>
-        {selectedPatient ? (
-          <Link to={`/run?patient=${selectedPatient.id}`} className="ml-auto px-3 py-2 rounded bg-gray-900 text-white text-sm">
-            {hasSessions ? "Rerun Test" : "Start Baseline"}
-          </Link>
-        ) : null}
-      </div>
-
-      <div className="rounded-lg border bg-white p-4 space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm text-gray-600">Baseline session</label>
-          <select
-            className="px-3 py-2 border rounded-lg bg-white"
-            value={baselineId}
-            onChange={(e) => setBaselineId(e.target.value)}
-            disabled={sessions.length === 0}
-          >
-            <option value="">
-              {sessions.length === 0 ? "No sessions yet" : "Select baseline..."}
-            </option>
-            {sessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.id} ({new Date(s.startedAt).toLocaleString()})
-              </option>
-            ))}
-          </select>
-          {baselineSession ? (
-            <div className="text-xs text-gray-500">
-              Started {new Date(baselineSession.startedAt).toLocaleString()}
-            </div>
-          ) : null}
+      {/* Patient Selection */}
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="px-5 py-3 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+          <h2 className="text-sm font-semibold text-gray-900">Patient Selection</h2>
         </div>
+        <div className="p-5 flex flex-wrap items-center gap-4">
+          <div className="flex-1 min-w-[240px]">
+            <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 block">
+              Patient
+            </label>
+            <select
+              className="border-2 border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50 w-full"
+              value={selectedPatientId}
+              onChange={(e) => {
+                const id = e.target.value;
+                setSelectedPatientId(id);
+                setParams(id ? { patient: id } : {});
+              }}
+            >
+              <option value="">Select patient...</option>
+              {patients.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.code} {p.initials ? `(${p.initials})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          {selectedPatient && (
+            <>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-gray-400 mb-1">Selected Patient</div>
+                <div className="font-semibold text-gray-900">{selectedPatient.code}</div>
+                {selectedPatient.initials && (
+                  <div className="text-xs text-gray-500">{selectedPatient.initials}</div>
+                )}
+              </div>
+              <ShimmerButton
+                onClick={() => window.location.href = `/run?patient=${selectedPatient.id}`}
+                variant="primary"
+                className="ml-auto"
+              >
+                {hasSessions ? "Rerun Test" : "Start Baseline"}
+              </ShimmerButton>
+            </>
+          )}
+        </div>
+      </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm text-gray-600">Rerun session</label>
-          <select
-            className="px-3 py-2 border rounded-lg bg-white"
-            value={rerunId}
-            onChange={(e) => setRerunId(e.target.value)}
-            disabled={!baselineId || rerunSessions.length === 0}
-          >
-            <option value="">
-              {rerunSessions.length === 0 ? "No reruns yet" : "Select rerun..."}
-            </option>
-            {rerunSessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.id} ({new Date(s.startedAt).toLocaleString()})
-              </option>
-            ))}
-          </select>
-          <button
-            className="px-3 py-2 rounded bg-gray-900 text-white text-sm disabled:opacity-60"
+      {/* Session Comparison */}
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="px-5 py-3 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+          <h2 className="text-sm font-semibold text-gray-900">Session Comparison</h2>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid md:grid-cols-2 gap-4">
+            {/* Baseline Session */}
+            <div>
+              <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 block">
+                Baseline Session
+              </label>
+              <select
+                className="border-2 border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50 w-full"
+                value={baselineId}
+                onChange={(e) => setBaselineId(e.target.value)}
+                disabled={sessions.length === 0}
+              >
+                <option value="">
+                  {sessions.length === 0 ? "No sessions yet" : "Select baseline..."}
+                </option>
+                {sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.id} ({new Date(s.startedAt).toLocaleString()})
+                  </option>
+                ))}
+              </select>
+              {baselineSession && (
+                <div className="text-xs text-gray-400 mt-2">
+                  Started {new Date(baselineSession.startedAt).toLocaleString()}
+                </div>
+              )}
+            </div>
+
+            {/* Rerun Session */}
+            <div>
+              <label className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 block">
+                Rerun Session
+              </label>
+              <select
+                className="border-2 border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all bg-white/50 w-full"
+                value={rerunId}
+                onChange={(e) => setRerunId(e.target.value)}
+                disabled={!baselineId || rerunSessions.length === 0}
+              >
+                <option value="">
+                  {rerunSessions.length === 0 ? "No reruns yet" : "Select rerun..."}
+                </option>
+                {rerunSessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.id} ({new Date(s.startedAt).toLocaleString()})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <ShimmerButton
             onClick={runComparison}
             disabled={!baselineId || !rerunId || loading}
+            variant="primary"
+            className="w-full md:w-auto"
           >
-            {loading ? "Comparing..." : "Compare"}
-          </button>
-        </div>
+            {loading ? "Comparing..." : "Compare Sessions"}
+          </ShimmerButton>
 
-        <div className="text-xs text-gray-500">
-          Gaze Settling Time (GST) measures how long (in milliseconds) from the first frame until gaze motion stays below a stability threshold for 5 consecutive steps.
-          Jitter (px) is the RMS deviation of gaze from the mean position during calibration, indicating fixation stability.
-          % Screen (diag) uses the window size captured when you click Compare.
+          <div className="text-xs text-gray-400 bg-blue-50/30 rounded-lg px-4 py-3 border border-blue-100/50">
+            <svg className="w-3.5 h-3.5 inline mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <strong>Gaze Settling Time (GST)</strong> measures how long (in milliseconds) from the first frame until gaze motion stays below a stability threshold for 5 consecutive steps.
+            <strong className="ml-2">Jitter (px)</strong> is the RMS deviation of gaze from the mean position during calibration, indicating fixation stability.
+            <strong className="ml-2">% Screen (diag)</strong> uses the window size captured when you click Compare.
+          </div>
         </div>
       </div>
 
+      {/* Error Alert */}
       {error && (
-        <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded">
+        <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
+      {/* Comparison Results Table */}
       {rows.length > 0 && (
-        <div className="rounded-lg border bg-white overflow-hidden">
-          <div className="px-3 py-2 border-b text-sm text-gray-600">Slide comparison</div>
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+            <h2 className="text-sm font-semibold text-gray-900">Slide Comparison</h2>
+          </div>
           <div className="overflow-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-gray-600">
+              <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
                 <tr>
-                  <th className="px-3 py-2 text-left">Slide</th>
-                  <th className="px-3 py-2 text-left">Baseline mean (x,y)</th>
-                  <th className="px-3 py-2 text-left">Rerun mean (x,y)</th>
-                  <th className="px-3 py-2 text-left">Distance</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Slide
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Baseline mean (x,y)
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Rerun mean (x,y)
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Distance
+                  </th>
                   <th
-                    className="px-3 py-2 text-left"
+                    className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
                     title="Baseline gaze settling time (ms from first frame until gaze motion stays below threshold for 5 consecutive steps)"
                   >
                     Baseline GST (ms)
                   </th>
                   <th
-                    className="px-3 py-2 text-left"
+                    className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
                     title="Rerun gaze settling time (ms from first frame until gaze motion stays below threshold for 5 consecutive steps)"
                   >
                     Rerun GST (ms)
                   </th>
                   <th
-                    className="px-3 py-2 text-left"
+                    className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
                     title="Baseline jitter RMS (px) - root mean square deviation from mean gaze position"
                   >
                     Baseline Jitter (px)
                   </th>
                   <th
-                    className="px-3 py-2 text-left"
+                    className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
                     title="Rerun jitter RMS (px) - root mean square deviation from mean gaze position"
                   >
                     Rerun Jitter (px)
                   </th>
                   <th
-                    className="px-3 py-2 text-left"
+                    className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
                     title="% Screen (diag) = mean shift as a percent of screen diagonal"
                   >
                     % Screen (diag)
                   </th>
-                  <th className="px-3 py-2 text-left">Frames</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Frames
+                  </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-gray-100">
                 {rows.map((row) => (
-                  <tr key={row.key} className="border-t">
-                    <td className="px-3 py-2">{row.label}</td>
-                    <td className="px-3 py-2">
+                  <tr key={row.key} className="hover:bg-blue-50/30 transition-colors">
+                    <td className="px-4 py-3">{row.label}</td>
+                    <td className="px-4 py-3">
                       {Math.round(row.baselineMean.x)}, {Math.round(row.baselineMean.y)}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">
                       {Math.round(row.rerunMean.x)}, {Math.round(row.rerunMean.y)}
                     </td>
-                    <td className="px-3 py-2">{row.distance.toFixed(1)}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">{row.distance.toFixed(1)}</td>
+                    <td className="px-4 py-3">
                       {row.baselineGST !== null
                         ? row.baselineGST.toFixed(0)
                         : "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">
                       {row.rerunGST !== null
                         ? row.rerunGST.toFixed(0)
                         : "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">
                       {row.baselineJitter !== null
                         ? row.baselineJitter.toFixed(1)
                         : "—"}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">
                       {row.rerunJitter !== null
                         ? row.rerunJitter.toFixed(1)
                         : "—"}
                     </td>
-                    <td className="px-3 py-2">{formatPct(row.pctScreenDiag, 2)}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-4 py-3">{formatPct(row.pctScreenDiag, 2)}</td>
+                    <td className="px-4 py-3">
                       {row.baselineCount} / {row.rerunCount}
                     </td>
                   </tr>
@@ -627,26 +468,35 @@ export default function Results() {
         </div>
       )}
 
+      {/* Missing Slides Warning */}
       {(missingBaseline.length > 0 || missingRerun.length > 0) && (
-        <div className="rounded-lg border bg-white p-4 space-y-2 text-sm">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-5 space-y-3">
+          <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider">Missing Slides</h3>
           {missingBaseline.length > 0 && (
-            <div>
-              <span className="text-gray-600">Slides missing in baseline:</span>{" "}
-              {missingBaseline.join(", ")}
+            <div className="text-sm">
+              <span className="font-medium text-gray-700">Baseline:</span>{" "}
+              <span className="text-gray-600">{missingBaseline.join(", ")}</span>
             </div>
           )}
           {missingRerun.length > 0 && (
-            <div>
-              <span className="text-gray-600">Slides missing in rerun:</span>{" "}
-              {missingRerun.join(", ")}
+            <div className="text-sm">
+              <span className="font-medium text-gray-700">Rerun:</span>{" "}
+              <span className="text-gray-600">{missingRerun.join(", ")}</span>
             </div>
           )}
         </div>
       )}
 
+      {/* No Reruns Message */}
       {baselineSession && rerunSessions.length === 0 && (
-        <div className="text-sm text-gray-600">
-          No reruns yet. Run another test to compare against the baseline.
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-6 text-center">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center">
+            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </div>
+          <p className="text-sm text-gray-600">No reruns yet.</p>
+          <p className="text-xs text-gray-400 mt-1">Run another test to compare against the baseline.</p>
         </div>
       )}
     </div>

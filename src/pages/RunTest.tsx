@@ -15,6 +15,8 @@ import {
   subscribeHeadPosition,
   type HeadPositionStatus,
 } from "../lib/tracker";
+import { ShimmerButton } from "../components/ui/shimmer-button";
+import { AnimatedBadge } from "../components/ui/animated-badge";
 
 const PROTOCOL_DURATIONS: Record<string, number> = {
   calibration: 400,
@@ -448,15 +450,7 @@ export default function RunTest() {
   // Redirect after session ends
   useEffect(() => {
     if (lastEnded && !running && !sessionId) {
-      // Session ended and saved (lastEnded is set)
-      // Redirect to /calibrate (which I will use for "Calibrate Current")
-      // The prompt says "redirect to /correction route with the session ID"
-      // I'll assume /calibrate is the route, and pass session ID as param?
-      // Or maybe /correction is a separate route I need to make?
-      // Prompt 2 says "Create src/pages/CalibrateCurrent.tsx ... Add route: <Route path="calibrate" element={<CalibrateCurrent />} />"
-      // Prompt 1 says "redirect to /correction route".
-      // I will use /calibrate and add a query param ?session=ID
-      navigate(`/calibrate?session=${lastEnded.id}`);
+      navigate(`/results`);
     }
   }, [lastEnded, running, sessionId, navigate]);
 
@@ -587,7 +581,7 @@ export default function RunTest() {
     void enterFullscreen();
     slideDelayTimer.current = window.setTimeout(() => {
       setSlidesReady(true);
-    }, 10000);
+    }, 2000);
 
     setBusy(false);
   }
@@ -643,8 +637,6 @@ export default function RunTest() {
       addSessionSummary(summary);
     }
 
-    await startHeadPosition({ fps: 20 }).catch(() => { });
-
     // Auto-run calibration if we have targets
     if (calibrationTargetsRef.current.length > 0) {
       console.log('[calibration] auto-running calibration fit...');
@@ -692,227 +684,247 @@ export default function RunTest() {
     setParams({ patient: pickerId });
   }
 
-  const trackerBadge =
+  const trackerBadgeVariant =
     trackerStatus === "running"
-      ? "bg-green-100 text-green-800 border-green-300"
+      ? "success"
       : trackerStatus === "error"
-        ? "bg-red-100 text-red-800 border-red-300"
+        ? "error"
         : trackerStatus === "stopped"
-          ? "bg-amber-100 text-amber-800 border-amber-300"
-          : "bg-gray-100 text-gray-800 border-gray-300";
+          ? "warning"
+          : "default";
 
-  const headBadge =
+  const headBadgeVariant =
     headStatus === "READY"
-      ? "bg-green-100 text-green-800 border-green-300"
+      ? "success"
       : headStatus === "STABILIZING"
-        ? "bg-amber-100 text-amber-800 border-amber-300"
+        ? "warning"
         : headStatus === "ALIGNING"
-          ? "bg-blue-100 text-blue-800 border-blue-300"
-          : "bg-red-100 text-red-800 border-red-300";
+          ? "info"
+          : "error";
 
   const stageClassName = running
     ? "fixed inset-0 bg-black flex items-center justify-center z-50"
-    : "w-full h-[480px] bg-black flex items-center justify-center";
+    : "w-full h-[480px] bg-gray-950 flex items-center justify-center rounded-b-xl";
 
   const slideImageClassName = running
     ? "w-screen h-screen object-contain select-none"
     : "max-h-[460px] max-w-full object-contain select-none";
 
   return (
-    <div className="p-6 space-y-4">
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold">Run Test</h1>
-        <span className={`text-xs px-2 py-0.5 border rounded ${trackerBadge}`}>
-          Tracker: {trackerStatus}
-          {typeof trackerPid === "number" ? ` · pid ${trackerPid}` : ""}
-        </span>
-        <span className={`text-xs px-2 py-0.5 border rounded ${headBadge}`}>
-          Head: {headStatus}
-        </span>
-        {busy && <span className="text-xs text-gray-500">…working</span>}
+    <div className="space-y-5 animate-fade-in">
+      {/* Header row */}
+      <div className="flex items-center justify-between">
+        <div className="relative">
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-gray-900 via-blue-900 to-purple-900 bg-clip-text text-transparent">
+            Run Test
+          </h1>
+          <p className="text-sm text-gray-500 mt-1">Configure and run eye-tracking test sessions.</p>
+          <div className="absolute -top-2 -left-2 w-20 h-20 bg-gradient-to-br from-blue-500/10 to-purple-500/10 rounded-full blur-2xl -z-10" />
+        </div>
+        <div className="flex items-center gap-2">
+          <AnimatedBadge variant={trackerBadgeVariant} pulse={trackerStatus === "running"}>
+            Tracker: {trackerStatus}
+            {typeof trackerPid === "number" ? ` (${trackerPid})` : ""}
+          </AnimatedBadge>
+          <AnimatedBadge variant={headBadgeVariant} pulse={headStatus === "READY"}>
+            Head: {headStatus}
+          </AnimatedBadge>
+          {busy && <span className="text-xs text-gray-400 animate-pulse">Working...</span>}
+        </div>
       </div>
 
-
-
-      <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
-        <div className="text-sm text-gray-700">{headInstruction || "Click 'Start Head Check' to begin"}</div>
-        <div className="ml-auto flex items-center gap-2">
-          {!running && (
-            <button
-              className="px-3 py-1.5 rounded bg-gray-900 text-white text-sm disabled:opacity-60"
-              onClick={headCheckActive ? stopHeadCheck : startHeadCheck}
-              disabled={busy}
-            >
-              {headCheckActive ? "Stop Head Check" : "Start Head Check"}
-            </button>
-          )}
+      {/* Head positioning */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm flex flex-wrap items-center gap-4">
+        <div className="flex-1 min-w-[200px]">
+          <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Head Position</div>
+          <div className="text-sm text-gray-700">{headInstruction || "Click 'Start Head Check' to begin"}</div>
+        </div>
+        <div className="flex items-center gap-3">
           {headCheckActive && (
             <>
-              <div className="w-40 h-2 bg-gray-200 rounded">
+              <div className="w-32 h-2 bg-gray-100 rounded-full overflow-hidden">
                 <div
-                  className="h-2 bg-gray-900 rounded"
+                  className="h-2 bg-gray-900 rounded-full transition-all duration-300"
                   style={{ width: `${Math.round(headProgress * 100)}%` }}
                 />
               </div>
-              <span className="text-xs text-gray-500">{Math.round(headProgress * 100)}%</span>
+              <span className="text-xs font-medium text-gray-500 tabular-nums w-8">{Math.round(headProgress * 100)}%</span>
             </>
+          )}
+          {!running && (
+            <ShimmerButton
+              onClick={headCheckActive ? stopHeadCheck : startHeadCheck}
+              disabled={busy}
+              variant="primary"
+            >
+              {headCheckActive ? "Stop Check" : "Start Head Check"}
+            </ShimmerButton>
           )}
         </div>
       </div>
 
       {error && (
-        <div className="text-sm text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded">
+        <div className="text-sm text-red-700 bg-red-50 border border-red-100 px-4 py-3 rounded-xl">
           {error}
         </div>
       )}
 
-      {/* Patient selector/badge */}
-      <div className="rounded-lg border bg-white p-3 flex flex-wrap items-center gap-3">
-        {patient ? (
-          <>
-            <div className="text-sm">
-              <span className="text-gray-600">Patient:</span>{" "}
-              <b>{patient.code}</b>
-              {patient.initials ? <span className="text-gray-500 ml-2">({patient.initials})</span> : null}
+      {/* Patient + Protocol controls in a grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Patient card */}
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Patient</div>
+          {patient ? (
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-gray-900">
+                  {patient.code}
+                  {patient.initials ? <span className="text-gray-400 ml-1.5 font-normal">({patient.initials})</span> : null}
+                </div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  Baseline: {baselineSession ? new Date(baselineSession.startedAt).toLocaleString() : "not recorded"}
+                  {patientSessions.length > 1 ? ` | Reruns: ${patientSessions.length - 1}` : ""}
+                </div>
+              </div>
+              <Link to="/patients" className="px-3 py-1.5 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+                Change
+              </Link>
             </div>
-            <div className="text-xs text-gray-500">
-              Baseline: {baselineSession ? new Date(baselineSession.startedAt).toLocaleString() : "not recorded"}
-              {patientSessions.length > 1 ? ` - Reruns: ${patientSessions.length - 1}` : ""}
+          ) : (
+            <div className="flex items-center gap-2">
+              <select
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                value={pickerId}
+                onChange={(e) => setPickerId(e.target.value)}
+              >
+                <option value="">Select patient...</option>
+                {patients.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.code} {p.initials ? `(${p.initials})` : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
+                onClick={attachPickedPatient}
+                disabled={!pickerId}
+              >
+                Use
+              </button>
+              <Link to="/patients" className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+                New
+              </Link>
             </div>
-            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">
-              Change
-            </Link>
-          </>
-        ) : (
-          <>
-            <div className="text-sm text-gray-600">No patient selected.</div>
+          )}
+        </div>
+
+        {/* Protocol card */}
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Protocol</div>
+          <div className="flex items-center gap-3">
             <select
-              className="px-2 py-1.5 border rounded bg-white text-sm"
-              value={pickerId}
-              onChange={(e) => setPickerId(e.target.value)}
+              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+              value={mode === 'all' ? 'ALL' : key}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === 'ALL') {
+                  setMode('all');
+                  const keys = Object.keys(manifest);
+                  if (keys.length > 0) setKey(keys[0]);
+                } else {
+                  setMode('single');
+                  setKey(val);
+                }
+              }}
+              disabled={running || busy}
             >
-              <option value="">Select patient…</option>
-              {patients.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code} {p.initials ? `(${p.initials})` : ""}
+              <option value="ALL">Run All Tests</option>
+              {Object.entries(manifest).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {v.label} ({v.slides.length})
                 </option>
               ))}
             </select>
-            <button
-              className="px-3 py-1.5 border rounded bg-white text-sm"
-              onClick={attachPickedPatient}
-              disabled={!pickerId}
-            >
-              Use
-            </button>
-            <Link to="/patients" className="px-3 py-1.5 border rounded bg-white text-sm">
-              Create new
-            </Link>
-          </>
-        )}
-      </div>
 
-      {/* Protocol + session controls */}
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-sm text-gray-600">Protocol</label>
-        <select
-          className="px-3 py-2 border rounded-lg bg-white"
-          value={mode === 'all' ? 'ALL' : key}
-          onChange={(e) => {
-            const val = e.target.value;
-            if (val === 'ALL') {
-              setMode('all');
-              const keys = Object.keys(manifest);
-              if (keys.length > 0) setKey(keys[0]);
-            } else {
-              setMode('single');
-              setKey(val);
-            }
-          }}
-          disabled={running || busy}
-        >
-          <option value="ALL">Run All Tests</option>
-          {Object.entries(manifest).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v.label} ({v.slides.length})
-            </option>
-          ))}
-        </select>
-
-        {!sessionId ? (
-          <button
-            className="ml-3 px-3 py-2 rounded-lg bg-gray-900 text-white disabled:opacity-60"
-            onClick={startSession}
-            disabled={!patient || slides.length === 0 || busy || headStatus !== "READY"}
-            title={
-              !patient
-                ? "Pick a patient first"
-                : headStatus !== "READY"
-                  ? "Align your head before starting"
-                  : ""
-            }
-          >
-            {patient ? (baselineSession ? "Rerun Test" : "Start Baseline") : "Start Session"}
-          </button>
-        ) : running ? (
-          <button
-            className="ml-3 px-3 py-2 rounded-lg bg-white border disabled:opacity-60"
-            onClick={endSession}
-            disabled={busy}
-          >
-            End Session
-          </button>
-        ) : (
-          <>
-            <button
-              className="ml-3 px-3 py-2 rounded-lg bg-white border"
-              onClick={exportJSON}
-              disabled={!lastEnded || busy}
-            >
-              Export JSON
-            </button>
-            <button
-              className="ml-2 px-3 py-2 rounded-lg bg-white border"
-              onClick={clearSession}
-              disabled={busy}
-            >
-              Clear
-            </button>
-            <button
-              className="ml-2 px-3 py-2 rounded-lg bg-white border"
-              onClick={() => openTrackerOutput()}
-            >
-              Open Output Folder
-            </button>
-          </>
-        )}
-
-        {sessionId && (
-          <span className="text-sm text-gray-600 ml-2">
-            Session: <b>{sessionId}</b>
-          </span>
-        )}
-      </div>
-
-      {/* Slide nav */}
-      <div className="flex items-center gap-2">
-        <button className="px-3 py-1 rounded bg-white border" onClick={prev} disabled={idx <= 0}>
-          ◀ Prev
-        </button>
-        <span className="text-sm">{slides.length ? `${idx + 1} / ${slides.length}` : "—"}</span>
-        <button
-          className="px-3 py-1 rounded bg-white border"
-          onClick={next}
-          disabled={idx >= slides.length - 1}
-        >
-          Next ▶
-        </button>
+            {!sessionId ? (
+              <ShimmerButton
+                onClick={startSession}
+                disabled={!patient || slides.length === 0 || busy || headStatus !== "READY"}
+                variant="primary"
+                className="whitespace-nowrap"
+                title={
+                  !patient
+                    ? "Pick a patient first"
+                    : headStatus !== "READY"
+                      ? "Align your head before starting"
+                      : ""
+                }
+              >
+                {patient ? (baselineSession ? "Rerun Test" : "Start Baseline") : "Start Session"}
+              </ShimmerButton>
+            ) : running ? (
+              <ShimmerButton
+                onClick={endSession}
+                disabled={busy}
+                variant="danger"
+              >
+                End Session
+              </ShimmerButton>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                  onClick={exportJSON}
+                  disabled={!lastEnded || busy}
+                >
+                  Export
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                  onClick={clearSession}
+                  disabled={busy}
+                >
+                  Clear
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                  onClick={() => openTrackerOutput()}
+                >
+                  Open Folder
+                </button>
+              </div>
+            )}
+          </div>
+          {sessionId && (
+            <div className="text-xs text-gray-400 mt-2">
+              Session: <span className="font-medium text-gray-600">{sessionId}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Stage */}
-      <div className="rounded-lg border bg-white overflow-hidden">
-        <div className={running ? "hidden" : "px-3 py-2 border-b text-sm text-gray-600"}>
-          {manifest[key]?.label ?? "—"} — slide {slides.length ? idx + 1 : "—"}
+      <div className="rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm">
+        <div className={running ? "hidden" : "px-4 py-2.5 border-b border-gray-100 flex items-center justify-between"}>
+          <span className="text-sm font-medium text-gray-700">
+            {manifest[key]?.label ?? "—"} — Slide {slides.length ? idx + 1 : "—"} of {slides.length || "—"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              className="px-2.5 py-1 rounded-md border border-gray-200 text-xs font-medium text-gray-500 hover:bg-gray-50 transition-colors disabled:opacity-40"
+              onClick={prev}
+              disabled={idx <= 0}
+            >
+              Prev
+            </button>
+            <button
+              className="px-2.5 py-1 rounded-md border border-gray-200 text-xs font-medium text-gray-500 hover:bg-gray-50 transition-colors disabled:opacity-40"
+              onClick={next}
+              disabled={idx >= slides.length - 1}
+            >
+              Next
+            </button>
+          </div>
         </div>
         <div ref={stageRef} className={stageClassName}>
           {current ? (
@@ -923,33 +935,32 @@ export default function RunTest() {
               draggable={false}
             />
           ) : (
-            <div className="text-white/70 text-sm">No slides found.</div>
+            <div className="text-white/50 text-sm">No slides found.</div>
           )}
         </div>
       </div>
 
       {/* Session info */}
-      <div className="p-4 rounded-lg border bg-white space-y-2 text-sm">
-        <div>
-          <span className="text-gray-600">Started:</span> <b>{startedAtIso ?? "—"}</b>
+      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">Session Info</div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+          <div>
+            <div className="text-xs text-gray-400 mb-0.5">Started</div>
+            <div className="font-medium text-gray-700">{startedAtIso ? new Date(startedAtIso).toLocaleTimeString() : "—"}</div>
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 mb-0.5">Ended</div>
+            <div className="font-medium text-gray-700">{endedAtIso ? new Date(endedAtIso).toLocaleTimeString() : "—"}</div>
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 mb-0.5">Slide Changes</div>
+            <div className="font-medium text-gray-700">{marks.length}</div>
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 mb-0.5">Timing</div>
+            <div className="text-xs text-gray-500">Center 800ms, target 1500ms</div>
+          </div>
         </div>
-        <div>
-          <span className="text-gray-600">Ended:</span> <b>{endedAtIso ?? "—"}</b>
-        </div>
-        <div>
-          <span className="text-gray-600">Recorded slide changes:</span> <b>{marks.length}</b>
-        </div>
-        <div className="text-gray-600">
-          Timing: Calibration center 800ms, target 1500ms. Others use protocol defaults. Use ← / → for manual control.
-        </div>
-      </div>
-
-      {/* Debug marks */}
-      <div className="p-4 rounded-lg border bg-white">
-        <div className="text-sm text-gray-600 mb-2">Slide marks (ms since start):</div>
-        <pre className="text-xs max-h-48 overflow-auto">
-          {JSON.stringify(marks, null, 2)}
-        </pre>
       </div>
     </div>
   );
