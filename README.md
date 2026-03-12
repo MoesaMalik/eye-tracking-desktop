@@ -13,6 +13,16 @@ A research application for conducting eye-tracking sessions with real-time analy
 
 ---
 
+## Contact details
+
+If you run into issues:
+
+1. **Abdullah Soboh** - abdullahsoboh@cmail.carleton.ca
+2. **Moesa Malik** - moesamalik@cmail.carleton.ca
+3. **Imann Brar** - imannbrar@cmail.carleton.ca
+
+---
+
 ##  Before You Start
 
 You'll need to install two things on your computer:
@@ -316,7 +326,7 @@ eye-tracking-desktop/
 If you run into issues:
 
 1. **Check this README** - especially the Troubleshooting section
-2. **Ask your instructor** - they can help with setup
+2. **Ask us!** - We are always willing to help: find us in the conctact details section.
 3. **Check the terminal output** - error messages often tell you what's wrong
 4. **Make sure all prerequisites are installed** - Node.js and Python
 
