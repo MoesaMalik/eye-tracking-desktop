@@ -10,7 +10,9 @@
     "dist": "npm run build && electron-builder",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && .venv/bin/pytest tracker/tests",
+    "test:ui": "vitest run",
+    "test:backend": ".venv/bin/pytest tracker/tests",
     "test:watch": "vitest"
   },
   "build": {
