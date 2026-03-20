@@ -4,5 +4,3 @@
 *.jpg binary
 *.ico binary
 *.svg text
-public/assets/protocols/**/*.png filter=lfs diff=lfs merge=lfs -text
-public/assets/protocols/**/*.jpg filter=lfs diff=lfs merge=lfs -text
