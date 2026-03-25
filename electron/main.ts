@@ -264,10 +264,10 @@ ipcMain.handle("tracking:pick-video", async () => {
   if (!win) return { ok: false, canceled: true, message: "window unavailable" };
   try {
     const result = await dialog.showOpenDialog(win, {
-      title: "Select MP4 Recording",
+      title: "Select Video Recording",
       properties: ["openFile"],
       filters: [
-        { name: "MP4 Video", extensions: ["mp4"] },
+        { name: "Video Files", extensions: ["mp4", "mkv"] },
       ],
     });
     if (result.canceled || result.filePaths.length === 0) {
@@ -781,6 +781,76 @@ ipcMain.handle(
       });
 
       return { ok: true, data: result };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+/* -------------------- Event Selection Save/Load IPC -------------------- */
+
+ipcMain.handle(
+  "recording:save-event-selection",
+  async (
+    _e,
+    {
+      sessionId,
+      eventTimes,
+      selectedIndices,
+    }: { sessionId: string; eventTimes: number[]; selectedIndices: number[] }
+  ) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session not found" };
+      }
+
+      const selectionData = {
+        eventTimes,
+        selectedIndices,
+        savedAt: new Date().toISOString(),
+      };
+
+      const selectionPath = path.join(sessionPath, "event_selection.json");
+      fs.writeFileSync(selectionPath, JSON.stringify(selectionData, null, 2));
+
+      return { ok: true, path: selectionPath, message: "Event selection saved" };
+    } catch (err: any) {
+      return { ok: false, message: String(err?.message ?? err) };
+    }
+  }
+);
+
+ipcMain.handle(
+  "recording:load-event-selection",
+  async (_e, { sessionId }: { sessionId: string }) => {
+    try {
+      const recDir = path.join(process.env.APP_ROOT!, "recordings");
+      const safeSession = safePathSegment(sessionId);
+      const sessionPath = path.join(recDir, safeSession);
+
+      if (!fs.existsSync(sessionPath)) {
+        return { ok: false, message: "Session not found" };
+      }
+
+      const selectionPath = path.join(sessionPath, "event_selection.json");
+
+      if (!fs.existsSync(selectionPath)) {
+        return { ok: true, data: null, message: "No saved selection found" };
+      }
+
+      const selectionData = JSON.parse(fs.readFileSync(selectionPath, "utf-8"));
+
+      return {
+        ok: true,
+        data: {
+          eventTimes: selectionData.eventTimes || [],
+          selectedIndices: selectionData.selectedIndices || [],
+        },
+      };
     } catch (err: any) {
       return { ok: false, message: String(err?.message ?? err) };
     }

@@ -157,9 +157,10 @@ export default function ProcessExternalVideos() {
     e.preventDefault();
     setIsDragging(false);
 
-    const files = Array.from(e.dataTransfer.files).filter((file) =>
-      file.name.toLowerCase().endsWith(".mp4")
-    );
+    const files = Array.from(e.dataTransfer.files).filter((file) => {
+      const fileName = file.name.toLowerCase();
+      return fileName.endsWith(".mp4") || fileName.endsWith(".mkv");
+    });
 
     addVideoFiles(files);
   }
@@ -179,7 +180,7 @@ export default function ProcessExternalVideos() {
   async function handleFilePicker() {
     const result = await pickTrackerVideo();
     if (result.ok && !result.canceled && result.path) {
-      const fileName = result.path.split(/[\\/]/).pop() || "video.mp4";
+      const fileName = result.path.split(/[\\/]/).pop() || "video";
       const newJob: VideoJob = {
         id: `${Date.now()}-${Math.random()}`,
         path: result.path,
@@ -216,7 +217,7 @@ export default function ProcessExternalVideos() {
             Process External Videos
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Batch process .mp4 videos from external eye-tracking systems
+            Batch process .mp4 and .mkv videos from external eye-tracking systems
           </p>
         </div>
       </div>
@@ -301,7 +302,7 @@ export default function ProcessExternalVideos() {
 
           <div className="text-gray-600">
             <div className="text-lg font-medium mb-1">
-              Drop .mp4 files here
+              Drop .mp4 or .mkv files here
             </div>
             <div className="text-sm text-gray-500">
               Or click "Choose Files" to select videos
@@ -331,7 +332,7 @@ export default function ProcessExternalVideos() {
               No videos in queue
             </div>
             <div className="text-sm text-gray-400 mt-1">
-              Drop .mp4 files above to get started
+              Drop .mp4 or .mkv files above to get started
             </div>
           </div>
         )}

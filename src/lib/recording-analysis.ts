@@ -293,3 +293,52 @@ export async function readRawTrackingData(sessionId: string): Promise<{
     };
   }
 }
+
+/**
+ * Save selected event indices for a session
+ */
+export async function saveEventSelection(params: {
+  sessionId: string;
+  eventTimes: number[];
+  selectedIndices: number[];
+}): Promise<{
+  ok: boolean;
+  message?: string;
+  path?: string;
+}> {
+  try {
+    const result = await invokeIpc("recording:save-event-selection", params);
+    return result as { ok: boolean; message?: string; path?: string };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Load saved event selection for a session
+ */
+export async function loadEventSelection(sessionId: string): Promise<{
+  ok: boolean;
+  data?: {
+    eventTimes: number[];
+    selectedIndices: number[];
+  };
+  message?: string;
+}> {
+  try {
+    const result = await invokeIpc("recording:load-event-selection", { sessionId });
+    return result as {
+      ok: boolean;
+      data?: { eventTimes: number[]; selectedIndices: number[] };
+      message?: string;
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
