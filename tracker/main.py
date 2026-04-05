@@ -14,6 +14,7 @@ Key Components:
 - `EyeTracker`: Main class for processing the recorded video.
 """
 import os
+import csv
 import argparse
 import signal
 import shutil
@@ -116,6 +117,73 @@ def clear_output_dir(path="output"):
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+
+# -------------- Eye Landmarks CSV Export --------------
+
+#: Ordered columns written to the eye-landmarks CSV.
+EYE_LANDMARK_COLUMNS = [
+    "frame",
+    "timestamp_sec",
+    # Left eye box landmarks (from MediaPipe FaceMesh)
+    "left_eye_left_x",
+    "left_eye_right_x",
+    "left_eye_top_x",
+    "left_eye_top_y",
+    "left_eye_bottom_x",
+    "left_eye_bottom_y",
+    # Right eye box landmarks
+    "right_eye_left_x",
+    "right_eye_right_x",
+    "right_eye_top_x",
+    "right_eye_top_y",
+    "right_eye_bottom_x",
+    "right_eye_bottom_y",
+    # MediaPipe iris rough centers
+    "left_mp_x",
+    "left_mp_y",
+    "right_mp_x",
+    "right_mp_y",
+    # Refined iris centers (ellipse/circle fit, smoothed)
+    "left_center_x",
+    "left_center_y",
+    "right_center_x",
+    "right_center_y",
+    # Average gaze
+    "gaze_x",
+    "gaze_y",
+    # Blink flag
+    "is_blink",
+]
+
+
+def write_eye_landmarks_csv(tracking_data, output_path):
+    """
+    CSV containing only eye landmark columns.
+
+    Line 1 is the header row.  Line 2 onwards are numeric values.
+    NaN / inf / None values are written as empty strings so Excel treats
+    them as blank cells rather than the text "nan".
+
+    Args:
+        tracking_data: list of per-frame dicts (EyeTracker.tracking_data).
+        output_path:   Path or str where the CSV file will be written.
+    """
+    output_path = Path(output_path)
+    with open(output_path, "w", newline="") as fout:
+        writer = csv.writer(fout)
+        writer.writerow(EYE_LANDMARK_COLUMNS)
+        for frame in tracking_data:
+            row = []
+            for col in EYE_LANDMARK_COLUMNS:
+                val = frame.get(col)
+                if val is None:
+                    row.append("")
+                elif isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                    row.append("")
+                else:
+                    row.append(val)
+            writer.writerow(row)
+
 
 # -------------- Recorder / Processor --------------
 class EyeTracker:
@@ -948,6 +1016,10 @@ class EyeTracker:
             }
             json.dump(payload, f, indent=2)
         print(f"✓ JSON: {json_path}")
+
+        landmarks_csv_path = self.output_dir / f"{self.video_path.stem}_eye_landmarks.csv"
+        write_eye_landmarks_csv(self.tracking_data, landmarks_csv_path)
+        print(f"✓ Eye landmarks CSV: {landmarks_csv_path}")
 
     def _apply_slide_marks(self):
         marks_path = self.output_dir / "slide_marks.json"
